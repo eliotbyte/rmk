@@ -164,9 +164,12 @@ pub struct Iqs5xxGestures {
     /// Pinch apart / together: tapped once per zoom step (§6.6).
     pub zoom_in: Option<u8>,
     pub zoom_out: Option<u8>,
-    /// Scales the IC's zoom distances (§6.6), in percent of its defaults; `None` keeps
-    /// them. Raise it when zoom takes over two-finger scrolling too easily.
-    pub zoom_distance_percent: Option<u16>,
+    /// How much the distance between the fingers must change before the first zoom
+    /// step, in percent of the trackpad's longer side (§6.6). `None` keeps the IC's
+    /// own value, which can be small at this driver's full resolution.
+    pub zoom_start_percent: Option<u8>,
+    /// The same for every further zoom step.
+    pub zoom_step_percent: Option<u8>,
 }
 
 impl Iqs5xxGestures {
@@ -193,9 +196,9 @@ impl Iqs5xxGestures {
     }
 }
 
-/// `distance` scaled by `percent`, saturating at the register's range.
-fn scale_distance(distance: u16, percent: u16) -> u16 {
-    u16::try_from(u32::from(distance) * u32::from(percent) / 100).unwrap_or(u16::MAX)
+/// `percent` of `span` pixels, saturating at the register's range.
+fn percent_of(span: u16, percent: u8) -> u16 {
+    u16::try_from(u32::from(span) * u32::from(percent) / 100).unwrap_or(u16::MAX)
 }
 
 /// The part of one cycle's motion block the gestures depend on.
@@ -466,31 +469,6 @@ where
         // whichever register the IQS5xx's auto-incrementing write pointer has
         // reached by then, and the intended target registers wouldn't be
         // touched at all.
-        // System Info 0 at 0x000F; §8.10.3. SHOW_RESET is set until ACK_RESET below,
-        // so it tells whether the gesture registers still hold their NV defaults.
-        let mut system_info_0 = [0u8; 1];
-        i2c_tx(
-            &mut self.i2c,
-            "read_system_info",
-            &mut [Operation::Write(&[0x00, 0x0F]), Operation::Read(&mut system_info_0)],
-        )
-        .await?;
-        let fresh_defaults = system_info_0[0] & 0b1000_0000 != 0;
-        if fresh_defaults && let Some(percent) = self.gestures.zoom_distance_percent {
-            // Zoom initial and consecutive distance, 2 bytes each at 0x06CC/0x06CE; §6.6.
-            for (tag, addr) in [("zoom_initial_distance", 0xCC), ("zoom_consecutive_distance", 0xCE)] {
-                let mut distance = [0u8; 2];
-                i2c_tx(
-                    &mut self.i2c,
-                    tag,
-                    &mut [Operation::Write(&[0x06, addr]), Operation::Read(&mut distance)],
-                )
-                .await?;
-                let [high, low] = scale_distance(u16::from_be_bytes(distance), percent).to_be_bytes();
-                i2c_tx(&mut self.i2c, tag, &mut [Operation::Write(&[0x06, addr, high, low])]).await?;
-            }
-        }
-
         for (tag, write) in [
             ("i2c_timeout", &i2c_timeout[..]),
             ("config", &config[..]),
@@ -501,6 +479,19 @@ where
             ("xy_resolution", &xy_resolution[..]),
         ] {
             i2c_tx(&mut self.i2c, tag, &mut [Operation::Write(write)]).await?;
+        }
+
+        // Zoom initial / consecutive distance, 2 bytes each at 0x06CC/0x06CE (§6.6), in
+        // pixels of the resolution set above.
+        let span = x_resolution.max(y_resolution);
+        for (tag, addr, percent) in [
+            ("zoom_initial_distance", 0xCC, self.gestures.zoom_start_percent),
+            ("zoom_consecutive_distance", 0xCE, self.gestures.zoom_step_percent),
+        ] {
+            if let Some(percent) = percent {
+                let [high, low] = percent_of(span, percent).to_be_bytes();
+                i2c_tx(&mut self.i2c, tag, &mut [Operation::Write(&[0x06, addr, high, low])]).await?;
+            }
         }
 
         i2c_tx(&mut self.i2c, "end_session", &mut [Operation::Write(&END_SESSION[..])]).await?;
@@ -668,7 +659,8 @@ mod tests {
         scroll: true,
         zoom_in: Some(7),
         zoom_out: Some(8),
-        zoom_distance_percent: None,
+        zoom_start_percent: None,
+        zoom_step_percent: None,
     };
 
     /// A cycle with one finger down, or two when it reports a scroll or zoom.
@@ -716,11 +708,11 @@ mod tests {
     }
 
     #[test]
-    fn zoom_distance_scales_by_percent_and_saturates() {
-        assert_eq!(scale_distance(150, 200), 300);
-        assert_eq!(scale_distance(150, 50), 75);
-        assert_eq!(scale_distance(150, 100), 150);
-        assert_eq!(scale_distance(40_000, 200), u16::MAX);
+    fn zoom_distances_are_a_share_of_the_trackpad() {
+        assert_eq!(percent_of(2304, 15), 345);
+        assert_eq!(percent_of(2304, 0), 0);
+        assert_eq!(percent_of(2304, 100), 2304);
+        assert_eq!(percent_of(u16::MAX, 255), u16::MAX);
     }
 
     #[test]

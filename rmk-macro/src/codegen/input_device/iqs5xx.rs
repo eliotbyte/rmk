@@ -159,10 +159,14 @@ fn expand_gestures(
         zoom_out,
     ] = GESTURES.map(key);
     let scroll = config.gestures.scroll;
-    let zoom_distance_percent = match config.gestures.zoom_distance_percent {
+    let [zoom_start_percent, zoom_step_percent] = [
+        config.gestures.zoom_start_percent,
+        config.gestures.zoom_step_percent,
+    ]
+    .map(|percent| match percent {
         Some(percent) => quote! { Some(#percent) },
         None => quote! { None },
-    };
+    });
     quote! {
         ::rmk::input_device::iqs5xx::Iqs5xxGestures {
             single_tap: #single_tap,
@@ -175,7 +179,8 @@ fn expand_gestures(
             scroll: #scroll,
             zoom_in: #zoom_in,
             zoom_out: #zoom_out,
-            zoom_distance_percent: #zoom_distance_percent,
+            zoom_start_percent: #zoom_start_percent,
+            zoom_step_percent: #zoom_step_percent,
         }
     }
 }

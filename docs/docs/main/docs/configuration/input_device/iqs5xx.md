@@ -90,9 +90,12 @@ two_finger_tap = "MouseBtn2"
 # Once per zoom step; Ctrl + = / Ctrl + - zoom most apps.
 zoom_in = "WM(Equal, LCtrl)"
 zoom_out = "WM(Minus, LCtrl)"
-# How far the fingers must spread or pinch before zooming, in percent of the
-# trackpad's default. Raise it if scrolling turns into zooming too easily.
-# zoom_distance_percent = 200
+# How much the distance between the fingers must change before zooming starts,
+# and for each further step, in percent of the trackpad's longer side. The
+# trackpad's own start distance can be small at full resolution, letting
+# two-finger scrolling turn into zooming.
+# zoom_start_percent = 15
+# zoom_step_percent = 8
 # Two-finger scrolling.
 scroll = true
 # Trackpad movement per scroll step; larger scrolls slower. Default: 8.
