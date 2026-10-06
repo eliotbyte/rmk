@@ -90,12 +90,15 @@ two_finger_tap = "MouseBtn2"
 # Once per zoom step; Ctrl + = / Ctrl + - zoom most apps.
 zoom_in = "WM(Equal, LCtrl)"
 zoom_out = "WM(Minus, LCtrl)"
-# How much the distance between the fingers must change before zooming starts,
-# and for each further step, in percent of the trackpad's longer side. The
-# trackpad's own start distance can be small at full resolution, letting
-# two-finger scrolling turn into zooming.
-# zoom_start_percent = 15
-# zoom_step_percent = 8
+# Two-finger scroll and zoom are told apart by how the fingers move (see below).
+# How far both fingers together move before deciding, in percent of the
+# trackpad's longer side. Default: 4.
+# two_finger_decide_percent = 4
+# A zoom needs the fingers moving in opposite directions along the line between
+# them, within this many degrees. Lower is stricter. Default: 25.
+# zoom_angle = 25
+# Change of finger distance per zoom step, in percent of the longer side. Default: 6.
+# zoom_step_percent = 6
 # Two-finger scrolling.
 scroll = true
 # Trackpad movement per scroll step; larger scrolls slower. Default: 8.
@@ -117,12 +120,18 @@ On a split keyboard use `[split.central.input_device.iqs5xx.gestures]` or
 | `single_tap` | One finger touches and lifts without moving |
 | `press_and_hold` | One finger stays still; the action is held until the finger lifts |
 | `two_finger_tap` | Two fingers tap together |
-| `scroll` | Two fingers move in parallel |
-| `zoom_in` / `zoom_out` | Two fingers move apart / together |
+| `scroll` | Two fingers move the same way |
+| `zoom_in` / `zoom_out` | Two fingers move apart / together along the line between them |
 | `swipe_*` | One finger moves quickly in one direction |
 
-A two-finger touch keeps the gesture it started with: once it scrolls it won't
-zoom, and once it zooms it won't scroll, until fewer than two fingers remain.
+The IC's own scroll and zoom aren't used: its zoom only checks that the
+distance between the fingers changed, so fingers drifting apart while scrolling
+zoom the page. Instead the driver reads both finger positions and, once they
+have moved `two_finger_decide_percent`, compares their directions: within 45° of
+each other is a scroll, opposite and along the line between the fingers (within
+`zoom_angle`) is a zoom. Anything else, such as rotating or moving one finger
+only, keeps waiting and ends up a scroll. The touch keeps that gesture until it
+is no longer exactly two fingers.
 
 Gestures press virtual keys (`KeyboardEventPos::Virtual`): their actions are in
 `BehaviorConfig::virtual_keys`, and scrolling reaches the `PointingProcessor` on

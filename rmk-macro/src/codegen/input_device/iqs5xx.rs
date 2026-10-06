@@ -159,14 +159,15 @@ fn expand_gestures(
         zoom_out,
     ] = GESTURES.map(key);
     let scroll = config.gestures.scroll;
-    let [zoom_start_percent, zoom_step_percent] = [
-        config.gestures.zoom_start_percent,
-        config.gestures.zoom_step_percent,
-    ]
-    .map(|percent| match percent {
-        Some(percent) => quote! { Some(#percent) },
-        None => quote! { None },
-    });
+    let decide_percent = config.gestures.two_finger_decide_percent.unwrap_or(4);
+    let zoom_angle = config.gestures.zoom_angle.unwrap_or(25);
+    if zoom_angle >= 90 {
+        panic!(
+            "\n\u{274c} keyboard.toml: iqs5xx `zoom_angle` must be below 90 degrees, got {zoom_angle}"
+        );
+    }
+    let zoom_cos_permille = (f64::from(zoom_angle).to_radians().cos() * 1000.0).round() as u16;
+    let zoom_step_percent = config.gestures.zoom_step_percent.unwrap_or(6);
     quote! {
         ::rmk::input_device::iqs5xx::Iqs5xxGestures {
             single_tap: #single_tap,
@@ -179,8 +180,11 @@ fn expand_gestures(
             scroll: #scroll,
             zoom_in: #zoom_in,
             zoom_out: #zoom_out,
-            zoom_start_percent: #zoom_start_percent,
-            zoom_step_percent: #zoom_step_percent,
+            two_finger: ::rmk::input_device::iqs5xx::TwoFingerConfig {
+                decide_percent: #decide_percent,
+                zoom_cos_permille: #zoom_cos_permille,
+                zoom_step_percent: #zoom_step_percent,
+            },
         }
     }
 }

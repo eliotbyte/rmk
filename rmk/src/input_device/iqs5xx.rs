@@ -69,13 +69,16 @@
 //!   scroll, zoom/pinch
 //! * raw per-channel count/delta data (§8.10.6)
 //!
-//! This driver requests only the 10-byte motion block at 0x000C (previous
-//! cycle time, gesture events, system info, number of fingers, relative XY).
-//! Relative XY is published as cursor movement. The IC's own gestures (§6) are
-//! enabled per [`Iqs5xxGestures`]: taps, press-and-hold, swipes and zoom press
-//! virtual keys (`KeyboardEventPos::Virtual`), whose actions live in
-//! `BehaviorConfig::virtual_keys`; two-finger scroll is published on the H/V
-//! axes. Absolute finger data and raw channel data are not read.
+//! This driver reads the motion block at 0x000C (previous cycle time, gesture
+//! events, system info, number of fingers, relative XY) and the absolute
+//! position of the first two fingers. Relative XY is published as cursor
+//! movement. The IC's one-finger gestures and two-finger tap (§6) are enabled
+//! per [`Iqs5xxGestures`] and press virtual keys (`KeyboardEventPos::Virtual`),
+//! whose actions live in `BehaviorConfig::virtual_keys`. Two-finger scroll and
+//! zoom are recognized here from the finger positions instead of by the IC,
+//! whose zoom only looks at the distance between the fingers: scrolling is
+//! published on the H/V axes, zoom steps press virtual keys. Raw channel data
+//! is not read.
 //!
 //! # Configuration
 //!
@@ -122,6 +125,9 @@ where
 
     gestures: Iqs5xxGestures,
 
+    /// `gestures.two_finger` in pixels of the resolution set at init.
+    two_finger_px: TwoFingerPx,
+
     state: GestureState,
 }
 
@@ -130,21 +136,75 @@ where
 struct GestureState {
     /// Whether the press-and-hold virtual key is down.
     holding: bool,
-    /// The two-finger gesture this touch settled on. The IC switches between scroll
-    /// and zoom mid-touch (§6.7), so fingers drifting apart while scrolling would
-    /// zoom; instead the first one keeps the touch until fewer than two fingers remain.
-    two_finger: Option<TwoFinger>,
+    two_finger: TwoFingerState,
 }
 
+/// A finger position, in pixels.
+type Point = (i32, i32);
+
+/// Where a two-finger touch stands. Once it is a scroll or a zoom it stays one
+/// until it is no longer exactly two fingers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TwoFingerState {
+    #[default]
+    Idle,
+    /// Two fingers down since `start`, not moved far enough to tell.
+    Deciding {
+        start: [Point; 2],
+    },
+    Scrolling {
+        last: [Point; 2],
+    },
+    /// Zooming; `base` is the finger distance at the last zoom step.
+    Zooming {
+        base: u32,
+    },
+}
+
+/// How two-finger scroll and zoom are told apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TwoFinger {
-    Scroll,
-    Zoom,
+pub struct TwoFingerConfig {
+    /// How far the two fingers together travel before the touch is decided, in
+    /// percent of the trackpad's longer side.
+    pub decide_percent: u8,
+    /// A zoom needs both fingers moving in opposite directions along the line between
+    /// them, within this angle; it's `cos(angle)` in permille (25° is 906).
+    pub zoom_cos_permille: u16,
+    /// How much the distance between the fingers changes per zoom step, in percent of
+    /// the trackpad's longer side.
+    pub zoom_step_percent: u8,
 }
 
-/// The IQS5xx's built-in gestures (§6) to enable, each with the index of the
-/// virtual key (`KeyboardEventPos::Virtual`) it presses. `None` leaves the
-/// gesture disabled on the IC.
+impl Default for TwoFingerConfig {
+    fn default() -> Self {
+        Self {
+            decide_percent: 4,
+            zoom_cos_permille: 906,
+            zoom_step_percent: 6,
+        }
+    }
+}
+
+/// [`TwoFingerConfig`] with distances in pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TwoFingerPx {
+    decide: u32,
+    zoom_step: u32,
+    zoom_cos_permille: u32,
+}
+
+impl TwoFingerPx {
+    fn new(config: &TwoFingerConfig, span: u16) -> Self {
+        Self {
+            decide: u32::from(percent_of(span, config.decide_percent)),
+            zoom_step: u32::from(percent_of(span, config.zoom_step_percent)).max(1),
+            zoom_cos_permille: u32::from(config.zoom_cos_permille.min(1000)),
+        }
+    }
+}
+
+/// The IQS5xx's gestures to enable, each with the index of the virtual key
+/// (`KeyboardEventPos::Virtual`) it presses. `None` leaves a gesture off.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Iqs5xxGestures {
     /// One-finger tap: the key is tapped when the finger lifts (§6.1).
@@ -159,17 +219,13 @@ pub struct Iqs5xxGestures {
     pub swipe_y_pos: Option<u8>,
     /// Two-finger tap (§6.4).
     pub two_finger_tap: Option<u8>,
-    /// Two-finger scroll, published on the H/V axes (§6.5).
+    /// Two fingers moving together scroll, published on the H/V axes.
     pub scroll: bool,
-    /// Pinch apart / together: tapped once per zoom step (§6.6).
+    /// Two fingers moving apart / together: tapped once per zoom step.
     pub zoom_in: Option<u8>,
     pub zoom_out: Option<u8>,
-    /// How much the distance between the fingers must change before the first zoom
-    /// step, in percent of the trackpad's longer side (§6.6). `None` keeps the IC's
-    /// own value, which can be small at this driver's full resolution.
-    pub zoom_start_percent: Option<u8>,
-    /// The same for every further zoom step.
-    pub zoom_step_percent: Option<u8>,
+    /// How two-finger scroll and zoom are recognized.
+    pub two_finger: TwoFingerConfig,
 }
 
 impl Iqs5xxGestures {
@@ -188,11 +244,14 @@ impl Iqs5xxGestures {
         .fold(0, |bits, (bit, key)| if key.is_some() { bits | 1 << bit } else { bits })
     }
 
-    /// Multi-finger Gestures register value, §8.10.22.
+    /// Multi-finger Gestures register value, §8.10.22. The IC's scroll and zoom stay
+    /// off: the driver recognizes them itself.
     fn multi_finger_enable(&self) -> u8 {
         u8::from(self.two_finger_tap.is_some())
-            | u8::from(self.scroll) << 1
-            | u8::from(self.zoom_in.is_some() || self.zoom_out.is_some()) << 2
+    }
+
+    fn zoom(&self) -> bool {
+        self.zoom_in.is_some() || self.zoom_out.is_some()
     }
 }
 
@@ -201,13 +260,15 @@ fn percent_of(span: u16, percent: u8) -> u16 {
     u16::try_from(u32::from(span) * u32::from(percent) / 100).unwrap_or(u16::MAX)
 }
 
-/// The part of one cycle's motion block the gestures depend on.
+/// The part of one cycle's data the gestures depend on.
 struct Motion {
     gesture_events_0: u8,
     gesture_events_1: u8,
     fingers: u8,
     dx: i16,
     dy: i16,
+    /// Absolute positions of fingers 1 and 2; meaningful while that many are down.
+    points: [Point; 2],
 }
 
 /// What one cycle turns into: virtual key presses `(index, pressed)` in order, and
@@ -218,9 +279,69 @@ struct CycleOutput {
     axes: Option<[(Axis, i16); 2]>,
 }
 
-/// Decode a cycle's gesture bits (§8.10.1-§8.10.2) against the enabled gestures,
-/// updating the state carried between cycles.
-fn decode_cycle(gestures: &Iqs5xxGestures, motion: &Motion, state: &mut GestureState) -> CycleOutput {
+fn sub(a: Point, b: Point) -> Point {
+    (a.0 - b.0, a.1 - b.1)
+}
+
+fn dot(a: Point, b: Point) -> i64 {
+    i64::from(a.0) * i64::from(b.0) + i64::from(a.1) * i64::from(b.1)
+}
+
+fn len(a: Point) -> u32 {
+    dot(a, a).unsigned_abs().isqrt() as u32
+}
+
+/// Whether the angle between `a` and `b` is within the one whose cosine is
+/// `cos_permille` / 1000, or of its opposite when `opposite`. Integer only:
+/// `cos(a, b) = dot / (|a| |b|)`, compared squared.
+fn within_angle(a: Point, b: Point, cos_permille: u32, opposite: bool) -> bool {
+    let d = dot(a, b);
+    if d == 0 || (d < 0) != opposite {
+        return false;
+    }
+    let lhs = i128::from(d) * i128::from(d) * 1_000_000;
+    let rhs = i128::from(cos_permille * cos_permille) * i128::from(dot(a, a)) * i128::from(dot(b, b));
+    lhs >= rhs
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TwoFinger {
+    Scroll,
+    Zoom,
+}
+
+/// Tell a two-finger touch that moved from `start` to `now` apart: a zoom when both
+/// fingers move in opposite directions along the line between them, a scroll when
+/// they move the same way, or `None` while that is still unclear.
+fn classify(start: [Point; 2], now: [Point; 2], px: &TwoFingerPx, zoom: bool) -> Option<TwoFinger> {
+    let d1 = sub(now[0], start[0]);
+    let d2 = sub(now[1], start[1]);
+    let travel = len(d1) + len(d2);
+    if travel < px.decide {
+        return None;
+    }
+    let axis = sub(start[1], start[0]);
+    let cos = px.zoom_cos_permille;
+    if zoom
+        && len(d1) >= px.decide / 4
+        && len(d2) >= px.decide / 4
+        && within_angle(d1, d2, cos, true)
+        && (within_angle(d1, axis, cos, false) || within_angle(d1, axis, cos, true))
+        && (within_angle(d2, axis, cos, false) || within_angle(d2, axis, cos, true))
+    {
+        return Some(TwoFinger::Zoom);
+    }
+    // Within 45° of each other; failing that, scroll once it has moved a lot, so a
+    // touch that never settles still does something harmless.
+    if within_angle(d1, d2, 707, false) || travel >= 3 * px.decide {
+        return Some(TwoFinger::Scroll);
+    }
+    None
+}
+
+/// Decode one cycle against the enabled gestures, updating the state carried
+/// between cycles.
+fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, state: &mut GestureState) -> CycleOutput {
     let mut out = CycleOutput::default();
     let tap = |key: Option<u8>, out: &mut CycleOutput| {
         if let Some(key) = key {
@@ -229,7 +350,6 @@ fn decode_cycle(gestures: &Iqs5xxGestures, motion: &Motion, state: &mut GestureS
         }
     };
     let g0 = motion.gesture_events_0;
-    let g1 = motion.gesture_events_1;
 
     let hold = g0 & 0b10 != 0;
     if let Some(key) = gestures.press_and_hold
@@ -251,43 +371,52 @@ fn decode_cycle(gestures: &Iqs5xxGestures, motion: &Motion, state: &mut GestureS
             tap(key, &mut out);
         }
     }
-    if g1 & 0b1 != 0 {
+    if motion.gesture_events_1 & 0b1 != 0 {
         tap(gestures.two_finger_tap, &mut out);
     }
 
-    if motion.fingers < 2 {
-        state.two_finger = None;
-    }
-    let two_finger = if g1 & 0b100 != 0 {
-        Some(TwoFinger::Zoom)
-    } else if g1 & 0b10 != 0 {
-        Some(TwoFinger::Scroll)
-    } else {
-        None
-    };
-    if let Some(gesture) = two_finger {
-        match state.two_finger {
-            // The other gesture took over mid-touch: drop it, motion included.
-            Some(locked) if locked != gesture => return out,
-            _ => state.two_finger = Some(gesture),
+    if motion.fingers != 2 {
+        state.two_finger = TwoFingerState::Idle;
+        if motion.fingers == 1 && (motion.dx != 0 || motion.dy != 0) {
+            out.axes = Some([(Axis::X, motion.dx), (Axis::Y, motion.dy)]);
         }
+        return out;
+    }
+    if !gestures.scroll && !gestures.zoom() {
+        return out;
     }
 
-    // During scroll and zoom the relative registers carry the gesture, not the cursor.
-    if g1 & 0b100 != 0 {
-        // The zoom step is in relative X, positive when the fingers move apart (§6.6).
-        if motion.dx > 0 {
+    let now = motion.points;
+    state.two_finger = match state.two_finger {
+        TwoFingerState::Idle => TwoFingerState::Deciding { start: now },
+        TwoFingerState::Deciding { start } => match classify(start, now, px, gestures.zoom()) {
+            Some(TwoFinger::Scroll) => TwoFingerState::Scrolling { last: now },
+            Some(TwoFinger::Zoom) => TwoFingerState::Zooming {
+                base: len(sub(start[1], start[0])),
+            },
+            None => TwoFingerState::Deciding { start },
+        },
+        TwoFingerState::Scrolling { last } => {
+            let (d1, d2) = (sub(now[0], last[0]), sub(now[1], last[1]));
+            let (h, v) = ((d1.0 + d2.0) / 2, (d1.1 + d2.1) / 2);
+            if gestures.scroll && (h != 0 || v != 0) {
+                let clamp = |x: i32| x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+                out.axes = Some([(Axis::H, clamp(h)), (Axis::V, clamp(v))]);
+            }
+            TwoFingerState::Scrolling { last: now }
+        }
+        zooming @ TwoFingerState::Zooming { .. } => zooming,
+    };
+    // At most one zoom step per cycle; the rest follow on the next cycles.
+    if let TwoFingerState::Zooming { base } = &mut state.two_finger {
+        let distance = len(sub(now[1], now[0]));
+        if distance >= *base + px.zoom_step {
+            *base += px.zoom_step;
             tap(gestures.zoom_in, &mut out);
-        } else if motion.dx < 0 {
+        } else if distance + px.zoom_step <= *base {
+            *base -= px.zoom_step;
             tap(gestures.zoom_out, &mut out);
         }
-    } else if motion.dx != 0 || motion.dy != 0 {
-        let (h, v) = if g1 & 0b10 != 0 {
-            (Axis::H, Axis::V)
-        } else {
-            (Axis::X, Axis::Y)
-        };
-        out.axes = Some([(h, motion.dx), (v, motion.dy)]);
     }
     out
 }
@@ -366,6 +495,7 @@ where
             initialized: false,
             pointing_device_id: rmk_id,
             gestures: Iqs5xxGestures::default(),
+            two_finger_px: TwoFingerPx::default(),
             state: GestureState::default(),
         }
     }
@@ -481,18 +611,7 @@ where
             i2c_tx(&mut self.i2c, tag, &mut [Operation::Write(write)]).await?;
         }
 
-        // Zoom initial / consecutive distance, 2 bytes each at 0x06CB-0x06CC / 0x06CD-0x06CE (§6.6), in
-        // pixels of the resolution set above.
-        let span = x_resolution.max(y_resolution);
-        for (tag, addr, percent) in [
-            ("zoom_initial_distance", 0xCB, self.gestures.zoom_start_percent),
-            ("zoom_consecutive_distance", 0xCD, self.gestures.zoom_step_percent),
-        ] {
-            if let Some(percent) = percent {
-                let [high, low] = percent_of(span, percent).to_be_bytes();
-                i2c_tx(&mut self.i2c, tag, &mut [Operation::Write(&[0x06, addr, high, low])]).await?;
-            }
-        }
+        self.two_finger_px = TwoFingerPx::new(&self.gestures.two_finger, x_resolution.max(y_resolution));
 
         i2c_tx(&mut self.i2c, "end_session", &mut [Operation::Write(&END_SESSION[..])]).await?;
 
@@ -510,8 +629,10 @@ where
     async fn read_motion(&mut self) -> Result<Motion, Error<I::Error>> {
         // Motion block at 0x000C..0x0015 per table 8.1: previous cycle time
         // (§4.1.1), gesture events 0/1 (§8.10.1-§8.10.2), system info 0/1
-        // (§8.10.3-§8.10.4), number of fingers (§5.2.1), relative XY (§5.2.2).
-        let mut data = [0u8; 10];
+        // (§8.10.3-§8.10.4), number of fingers (§5.2.1), relative XY (§5.2.2),
+        // then absolute X/Y, strength and area of fingers 1 and 2 (§5.2.3-§5.2.6),
+        // 7 bytes each at 0x0016 and 0x001D.
+        let mut data = [0u8; 24];
         let mut operations = [
             // In theory, it's possible to skip the initial address selection
             // write if the last window closed cleanly and RMK has previously
@@ -545,6 +666,11 @@ where
         let number_of_fingers = data[5];
         let dx = i16::from_be_bytes(unwrap!(data[6..8].try_into()));
         let dy = i16::from_be_bytes(unwrap!(data[8..10].try_into()));
+        let point = |at: usize| {
+            let coordinate = |at: usize| i32::from(u16::from_be_bytes([data[at], data[at + 1]]));
+            (coordinate(at), coordinate(at + 2))
+        };
+        let points = [point(10), point(17)];
 
         // §8.10.3: system_info_0.
         let charging_mode = match system_info_0 & 0b111 {
@@ -584,6 +710,7 @@ where
             fingers: number_of_fingers,
             dx,
             dy,
+            points,
         })
     }
 
@@ -619,7 +746,7 @@ where
             }
             match self.read_motion().await {
                 Ok(motion) => {
-                    let out = decode_cycle(&self.gestures, &motion, &mut self.state);
+                    let out = decode_cycle(&self.gestures, &self.two_finger_px, &motion, &mut self.state);
                     for (key, pressed) in out.keys {
                         Self::publish_virtual_key(key, pressed).await;
                     }
@@ -659,155 +786,217 @@ mod tests {
         scroll: true,
         zoom_in: Some(7),
         zoom_out: Some(8),
-        zoom_start_percent: None,
-        zoom_step_percent: None,
+        two_finger: TwoFingerConfig {
+            decide_percent: 4,
+            zoom_cos_permille: 906,
+            zoom_step_percent: 6,
+        },
     };
 
-    /// A cycle with one finger down, or two when it reports a scroll or zoom.
-    fn motion(gesture_events_0: u8, gesture_events_1: u8, dx: i16, dy: i16) -> Motion {
-        let fingers = if gesture_events_1 & 0b110 != 0 { 2 } else { 1 };
+    /// A 1000-pixel trackpad: deciding at 40 px, a zoom step every 60 px.
+    const PX: TwoFingerPx = TwoFingerPx {
+        decide: 40,
+        zoom_step: 60,
+        zoom_cos_permille: 906,
+    };
+
+    fn one_finger(gesture_events_0: u8, dx: i16, dy: i16) -> Motion {
         Motion {
             gesture_events_0,
-            gesture_events_1,
-            fingers,
+            gesture_events_1: 0,
+            fingers: 1,
             dx,
             dy,
+            points: [(0, 0); 2],
+        }
+    }
+
+    fn two_fingers(a: Point, b: Point) -> Motion {
+        Motion {
+            gesture_events_0: 0,
+            gesture_events_1: 0,
+            fingers: 2,
+            dx: 0,
+            dy: 0,
+            points: [a, b],
         }
     }
 
     fn lifted() -> Motion {
         Motion {
-            gesture_events_0: 0,
-            gesture_events_1: 0,
             fingers: 0,
-            dx: 0,
-            dy: 0,
+            ..one_finger(0, 0, 0)
         }
     }
 
-    fn keys(out: &CycleOutput) -> &[(u8, bool)] {
-        &out.keys
+    fn run(motions: &[Motion]) -> (Vec<CycleOutput>, GestureState) {
+        let mut state = GestureState::default();
+        let outs = motions
+            .iter()
+            .map(|motion| decode_cycle(&ALL, &PX, motion, &mut state))
+            .collect();
+        (outs, state)
+    }
+
+    fn keys(outs: &[CycleOutput]) -> Vec<(u8, bool)> {
+        outs.iter().flat_map(|out| out.keys.iter().copied()).collect()
+    }
+
+    fn axes(outs: &[CycleOutput]) -> Vec<[(Axis, i16); 2]> {
+        outs.iter().filter_map(|out| out.axes).collect()
     }
 
     #[test]
     fn enable_registers_follow_the_datasheet_bit_order() {
         assert_eq!(ALL.single_finger_enable(), 0b11_1111);
-        assert_eq!(ALL.multi_finger_enable(), 0b111);
+        // Scroll and zoom are the driver's, not the IC's.
+        assert_eq!(ALL.multi_finger_enable(), 0b001);
         let swipe_y_neg_only = Iqs5xxGestures {
             swipe_y_neg: Some(0),
             ..Default::default()
         };
         assert_eq!(swipe_y_neg_only.single_finger_enable(), 0b10_0000);
-        let zoom_out_only = Iqs5xxGestures {
-            zoom_out: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(zoom_out_only.multi_finger_enable(), 0b100);
         assert_eq!(Iqs5xxGestures::default().single_finger_enable(), 0);
         assert_eq!(Iqs5xxGestures::default().multi_finger_enable(), 0);
     }
 
     #[test]
-    fn zoom_distances_are_a_share_of_the_trackpad() {
-        assert_eq!(percent_of(2304, 15), 345);
-        assert_eq!(percent_of(2304, 0), 0);
-        assert_eq!(percent_of(2304, 100), 2304);
-        assert_eq!(percent_of(u16::MAX, 255), u16::MAX);
-    }
-
-    #[test]
-    fn plain_motion_moves_the_cursor() {
-        let out = decode_cycle(&ALL, &motion(0, 0, 3, -4), &mut GestureState::default());
-        assert!(keys(&out).is_empty());
-        assert_eq!(out.axes, Some([(Axis::X, 3), (Axis::Y, -4)]));
+    fn one_finger_moves_the_cursor() {
+        let (outs, _) = run(&[one_finger(0, 3, -4)]);
+        assert!(keys(&outs).is_empty());
+        assert_eq!(axes(&outs), vec![[(Axis::X, 3), (Axis::Y, -4)]]);
     }
 
     #[test]
     fn taps_press_and_release_their_keys() {
-        let out = decode_cycle(&ALL, &motion(0b1, 0, 0, 0), &mut GestureState::default());
-        assert_eq!(keys(&out), &[(0, true), (0, false)]);
-        assert_eq!(out.axes, None);
-        let out = decode_cycle(&ALL, &motion(0, 0b1, 0, 0), &mut GestureState::default());
-        assert_eq!(keys(&out), &[(6, true), (6, false)]);
+        let (outs, _) = run(&[one_finger(0b1, 0, 0)]);
+        assert_eq!(keys(&outs), vec![(0, true), (0, false)]);
+        let mut two_finger_tap = lifted();
+        two_finger_tap.gesture_events_1 = 0b1;
+        let (outs, _) = run(&[two_finger_tap]);
+        assert_eq!(keys(&outs), vec![(6, true), (6, false)]);
     }
 
     #[test]
     fn swipes_map_to_their_bits() {
         for (bit, key) in [(2, 2), (3, 3), (4, 5), (5, 4)] {
-            let out = decode_cycle(&ALL, &motion(1 << bit, 0, 0, 0), &mut GestureState::default());
-            assert_eq!(keys(&out), &[(key, true), (key, false)], "bit {bit}");
+            let (outs, _) = run(&[one_finger(1 << bit, 0, 0)]);
+            assert_eq!(keys(&outs), vec![(key, true), (key, false)], "bit {bit}");
         }
     }
 
     #[test]
     fn press_and_hold_stays_down_and_drags() {
-        let mut state = GestureState::default();
-        let out = decode_cycle(&ALL, &motion(0b10, 0, 0, 0), &mut state);
-        assert_eq!(keys(&out), &[(1, true)]);
+        let (outs, state) = run(&[one_finger(0b10, 0, 0), one_finger(0b10, 5, 1)]);
+        assert_eq!(keys(&outs), vec![(1, true)]);
+        assert_eq!(axes(&outs), vec![[(Axis::X, 5), (Axis::Y, 1)]]);
         assert!(state.holding);
-        // Still held: no key change, the cursor moves.
-        let out = decode_cycle(&ALL, &motion(0b10, 0, 5, 1), &mut state);
-        assert!(keys(&out).is_empty());
-        assert_eq!(out.axes, Some([(Axis::X, 5), (Axis::Y, 1)]));
-        let out = decode_cycle(&ALL, &lifted(), &mut state);
-        assert_eq!(keys(&out), &[(1, false)]);
+        let (outs, state) = run(&[one_finger(0b10, 0, 0), lifted()]);
+        assert_eq!(keys(&outs), vec![(1, true), (1, false)]);
         assert!(!state.holding);
     }
 
     #[test]
-    fn two_finger_scroll_goes_to_the_scroll_axes() {
-        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut GestureState::default());
-        assert!(keys(&out).is_empty());
-        assert_eq!(out.axes, Some([(Axis::H, 0), (Axis::V, -7)]));
+    fn two_fingers_moving_together_scroll() {
+        let (outs, state) = run(&[
+            two_fingers((100, 500), (300, 500)),
+            two_fingers((100, 520), (300, 522)), // decided: same direction
+            two_fingers((100, 530), (300, 532)),
+        ]);
+        assert!(keys(&outs).is_empty());
+        assert_eq!(axes(&outs), vec![[(Axis::H, 0), (Axis::V, 10)]]);
+        assert!(matches!(state.two_finger, TwoFingerState::Scrolling { .. }));
     }
 
     #[test]
-    fn zoom_taps_in_or_out_by_sign_and_never_moves_the_cursor() {
-        let out = decode_cycle(&ALL, &motion(0, 0b100, 12, 0), &mut GestureState::default());
-        assert_eq!(keys(&out), &[(7, true), (7, false)]);
-        assert_eq!(out.axes, None);
-        let out = decode_cycle(&ALL, &motion(0, 0b100, -12, 0), &mut GestureState::default());
-        assert_eq!(keys(&out), &[(8, true), (8, false)]);
-        assert_eq!(out.axes, None);
+    fn two_fingers_moving_apart_along_their_line_zoom_in() {
+        let (outs, _) = run(&[
+            two_fingers((400, 500), (600, 500)), // 200 apart
+            two_fingers((380, 501), (620, 499)), // decided: opposite, along the line; 240
+            two_fingers((340, 500), (660, 500)), // 320: a step past 200 + 60
+            two_fingers((345, 500), (655, 500)), // 310: short of the next at 320
+        ]);
+        assert!(axes(&outs).is_empty());
+        assert_eq!(keys(&outs), vec![(7, true), (7, false)]);
     }
 
     #[test]
-    fn a_scroll_is_not_taken_over_by_zoom_until_the_fingers_lift() {
-        let mut state = GestureState::default();
-        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut state);
-        assert_eq!(out.axes, Some([(Axis::H, 0), (Axis::V, -7)]));
-        // The fingers drift apart: the IC reports a zoom, which is dropped.
-        let out = decode_cycle(&ALL, &motion(0, 0b100, 12, 0), &mut state);
-        assert!(keys(&out).is_empty());
-        assert_eq!(out.axes, None);
-        // Back to scrolling within the same touch.
-        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -3), &mut state);
-        assert_eq!(out.axes, Some([(Axis::H, 0), (Axis::V, -3)]));
-        // A new touch can zoom.
-        decode_cycle(&ALL, &lifted(), &mut state);
-        let out = decode_cycle(&ALL, &motion(0, 0b100, 12, 0), &mut state);
-        assert_eq!(keys(&out), &[(7, true), (7, false)]);
+    fn two_fingers_pinching_zoom_out() {
+        let (outs, _) = run(&[
+            two_fingers((300, 500), (700, 500)), // 400 apart
+            two_fingers((330, 500), (670, 500)), // decided; 340: a step below 400 - 60
+            two_fingers((340, 500), (660, 500)), // 320: short of the next at 280
+        ]);
+        assert_eq!(keys(&outs), vec![(8, true), (8, false)]);
     }
 
     #[test]
-    fn a_zoom_is_not_taken_over_by_scroll_until_the_fingers_lift() {
-        let mut state = GestureState::default();
-        decode_cycle(&ALL, &motion(0, 0b100, -12, 0), &mut state);
-        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut state);
-        assert_eq!(out.axes, None);
-        // One finger lifted ends the two-finger gesture.
-        decode_cycle(&ALL, &motion(0, 0, 0, 0), &mut state);
-        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut state);
-        assert_eq!(out.axes, Some([(Axis::H, 0), (Axis::V, -7)]));
+    fn opposite_but_across_the_line_is_not_a_zoom() {
+        // Rotating: the fingers move apart from each other's path, not along it.
+        let (outs, state) = run(&[two_fingers((400, 500), (600, 500)), two_fingers((400, 470), (600, 530))]);
+        assert!(keys(&outs).is_empty());
+        assert!(!matches!(state.two_finger, TwoFingerState::Zooming { .. }));
     }
 
     #[test]
-    fn gestures_without_a_key_are_ignored() {
-        let none = Iqs5xxGestures::default();
-        let mut state = GestureState::default();
-        let out = decode_cycle(&none, &motion(0b11_1111, 0b001, 2, 2), &mut state);
-        assert!(keys(&out).is_empty());
-        assert!(!state.holding);
-        assert_eq!(out.axes, Some([(Axis::X, 2), (Axis::Y, 2)]));
+    fn one_finger_still_is_not_a_zoom() {
+        let (outs, state) = run(&[two_fingers((400, 500), (600, 500)), two_fingers((400, 500), (650, 500))]);
+        assert!(keys(&outs).is_empty());
+        assert!(!matches!(state.two_finger, TwoFingerState::Zooming { .. }));
+    }
+
+    #[test]
+    fn small_jitter_decides_nothing() {
+        let (outs, state) = run(&[
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((390, 500), (610, 500)), // opposite, but only 20 px in all
+        ]);
+        assert!(keys(&outs).is_empty() && axes(&outs).is_empty());
+        assert!(matches!(state.two_finger, TwoFingerState::Deciding { .. }));
+    }
+
+    #[test]
+    fn a_scroll_stays_a_scroll_until_the_fingers_lift() {
+        let (outs, _) = run(&[
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((400, 540), (600, 540)), // scrolling
+            two_fingers((350, 540), (650, 540)), // fingers spread: still scrolls
+            two_fingers((300, 540), (700, 540)),
+            lifted(),
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((350, 500), (650, 500)), // a new touch zooms: 300, past 260
+            two_fingers((345, 500), (655, 500)),
+        ]);
+        // The spread mid-scroll scrolls by zero and doesn't zoom; only the new touch does.
+        assert_eq!(keys(&outs), vec![(7, true), (7, false)]);
+        assert!(axes(&outs).is_empty());
+    }
+
+    #[test]
+    fn a_third_finger_ends_the_two_finger_gesture() {
+        let mut three = two_fingers((0, 0), (0, 0));
+        three.fingers = 3;
+        let (_, state) = run(&[
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((400, 540), (600, 540)),
+            three,
+        ]);
+        assert_eq!(state.two_finger, TwoFingerState::Idle);
+    }
+
+    #[test]
+    fn distances_are_a_share_of_the_trackpad() {
+        assert_eq!(percent_of(2304, 15), 345);
+        assert_eq!(percent_of(2304, 0), 0);
+        assert_eq!(percent_of(u16::MAX, 255), u16::MAX);
+        let px = TwoFingerPx::new(&TwoFingerConfig::default(), 1000);
+        assert_eq!(
+            px,
+            TwoFingerPx {
+                decide: 40,
+                zoom_step: 60,
+                zoom_cos_permille: 906
+            }
+        );
     }
 }

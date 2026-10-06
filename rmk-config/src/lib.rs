@@ -1413,11 +1413,14 @@ pub struct Iqs5xxGesturesConfig {
     /// Two fingers moving apart / together, once per zoom step, e.g. `"WM(Equal, LCtrl)"`.
     pub zoom_in: Option<String>,
     pub zoom_out: Option<String>,
-    /// How much the distance between the fingers must change before zooming starts,
-    /// in percent of the trackpad's longer side. Raise it if two-finger scrolling
-    /// turns into zooming too easily. Defaults to the trackpad's own setting.
-    pub zoom_start_percent: Option<u8>,
-    /// The same for every further zoom step.
+    /// How far the two fingers together move before the touch is decided as a scroll
+    /// or a zoom, in percent of the trackpad's longer side. Defaults to 4.
+    pub two_finger_decide_percent: Option<u8>,
+    /// A zoom needs both fingers moving in opposite directions along the line between
+    /// them, within this many degrees. Lower is stricter. Defaults to 25.
+    pub zoom_angle: Option<u8>,
+    /// How much the distance between the fingers changes per zoom step, in percent of
+    /// the trackpad's longer side. Defaults to 6.
     pub zoom_step_percent: Option<u8>,
     /// Two-finger scrolling.
     #[serde(default)]
