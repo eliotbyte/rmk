@@ -148,6 +148,9 @@ pub struct Iqs5xxGestures {
     /// Pinch apart / together: tapped once per zoom step (§6.6).
     pub zoom_in: Option<u8>,
     pub zoom_out: Option<u8>,
+    /// Scales the IC's zoom distances (§6.6), in percent of its defaults; `None` keeps
+    /// them. Raise it when zoom takes over two-finger scrolling too easily.
+    pub zoom_distance_percent: Option<u16>,
 }
 
 impl Iqs5xxGestures {
@@ -172,6 +175,11 @@ impl Iqs5xxGestures {
             | u8::from(self.scroll) << 1
             | u8::from(self.zoom_in.is_some() || self.zoom_out.is_some()) << 2
     }
+}
+
+/// `distance` scaled by `percent`, saturating at the register's range.
+fn scale_distance(distance: u16, percent: u16) -> u16 {
+    u16::try_from(u32::from(distance) * u32::from(percent) / 100).unwrap_or(u16::MAX)
 }
 
 /// The part of one cycle's motion block the gestures depend on.
@@ -423,6 +431,31 @@ where
         // whichever register the IQS5xx's auto-incrementing write pointer has
         // reached by then, and the intended target registers wouldn't be
         // touched at all.
+        // System Info 0 at 0x000F; §8.10.3. SHOW_RESET is set until ACK_RESET below,
+        // so it tells whether the gesture registers still hold their NV defaults.
+        let mut system_info_0 = [0u8; 1];
+        i2c_tx(
+            &mut self.i2c,
+            "read_system_info",
+            &mut [Operation::Write(&[0x00, 0x0F]), Operation::Read(&mut system_info_0)],
+        )
+        .await?;
+        let fresh_defaults = system_info_0[0] & 0b1000_0000 != 0;
+        if fresh_defaults && let Some(percent) = self.gestures.zoom_distance_percent {
+            // Zoom initial and consecutive distance, 2 bytes each at 0x06CC/0x06CE; §6.6.
+            for (tag, addr) in [("zoom_initial_distance", 0xCC), ("zoom_consecutive_distance", 0xCE)] {
+                let mut distance = [0u8; 2];
+                i2c_tx(
+                    &mut self.i2c,
+                    tag,
+                    &mut [Operation::Write(&[0x06, addr]), Operation::Read(&mut distance)],
+                )
+                .await?;
+                let [high, low] = scale_distance(u16::from_be_bytes(distance), percent).to_be_bytes();
+                i2c_tx(&mut self.i2c, tag, &mut [Operation::Write(&[0x06, addr, high, low])]).await?;
+            }
+        }
+
         for (tag, write) in [
             ("i2c_timeout", &i2c_timeout[..]),
             ("config", &config[..]),
@@ -599,6 +632,7 @@ mod tests {
         scroll: true,
         zoom_in: Some(7),
         zoom_out: Some(8),
+        zoom_distance_percent: None,
     };
 
     fn motion(gesture_events_0: u8, gesture_events_1: u8, dx: i16, dy: i16) -> Motion {
@@ -630,6 +664,14 @@ mod tests {
         assert_eq!(zoom_out_only.multi_finger_enable(), 0b100);
         assert_eq!(Iqs5xxGestures::default().single_finger_enable(), 0);
         assert_eq!(Iqs5xxGestures::default().multi_finger_enable(), 0);
+    }
+
+    #[test]
+    fn zoom_distance_scales_by_percent_and_saturates() {
+        assert_eq!(scale_distance(150, 200), 300);
+        assert_eq!(scale_distance(150, 50), 75);
+        assert_eq!(scale_distance(150, 100), 150);
+        assert_eq!(scale_distance(40_000, 200), u16::MAX);
     }
 
     #[test]
