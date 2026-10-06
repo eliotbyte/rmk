@@ -42,9 +42,13 @@ enum Gesture {
     TwoFingerTap,
     ZoomIn,
     ZoomOut,
+    TwoFingerSwipeXNeg,
+    TwoFingerSwipeXPos,
+    TwoFingerSwipeYNeg,
+    TwoFingerSwipeYPos,
 }
 
-const GESTURES: [Gesture; 9] = [
+const GESTURES: [Gesture; 13] = [
     Gesture::SingleTap,
     Gesture::PressAndHold,
     Gesture::SwipeXNeg,
@@ -54,22 +58,37 @@ const GESTURES: [Gesture; 9] = [
     Gesture::TwoFingerTap,
     Gesture::ZoomIn,
     Gesture::ZoomOut,
+    Gesture::TwoFingerSwipeXNeg,
+    Gesture::TwoFingerSwipeXPos,
+    Gesture::TwoFingerSwipeYNeg,
+    Gesture::TwoFingerSwipeYPos,
 ];
 
 /// The action configured for `gesture`. Swipes are configured by cursor direction,
 /// so a sensor-axis swipe goes through the same invert/swap as the cursor.
 fn gesture_action(config: &Iqs5xxConfig, gesture: Gesture) -> Option<&String> {
     let g = &config.gestures;
-    let sensor = match gesture {
+    let one = [&g.swipe_left, &g.swipe_right, &g.swipe_up, &g.swipe_down];
+    let two = [
+        &g.two_finger_swipe_left,
+        &g.two_finger_swipe_right,
+        &g.two_finger_swipe_up,
+        &g.two_finger_swipe_down,
+    ];
+    let ([left, right, up, down], sensor) = match gesture {
         Gesture::SingleTap => return g.single_tap.as_ref(),
         Gesture::PressAndHold => return g.press_and_hold.as_ref(),
         Gesture::TwoFingerTap => return g.two_finger_tap.as_ref(),
         Gesture::ZoomIn => return g.zoom_in.as_ref(),
         Gesture::ZoomOut => return g.zoom_out.as_ref(),
-        Gesture::SwipeXNeg => (-1, 0),
-        Gesture::SwipeXPos => (1, 0),
-        Gesture::SwipeYNeg => (0, -1),
-        Gesture::SwipeYPos => (0, 1),
+        Gesture::SwipeXNeg => (one, (-1, 0)),
+        Gesture::SwipeXPos => (one, (1, 0)),
+        Gesture::SwipeYNeg => (one, (0, -1)),
+        Gesture::SwipeYPos => (one, (0, 1)),
+        Gesture::TwoFingerSwipeXNeg => (two, (-1, 0)),
+        Gesture::TwoFingerSwipeXPos => (two, (1, 0)),
+        Gesture::TwoFingerSwipeYNeg => (two, (0, -1)),
+        Gesture::TwoFingerSwipeYPos => (two, (0, 1)),
     };
     let (mut x, mut y) = sensor;
     if config.proc_invert_x {
@@ -83,10 +102,10 @@ fn gesture_action(config: &Iqs5xxConfig, gesture: Gesture) -> Option<&String> {
     }
     // Cursor +Y points down.
     match (x, y) {
-        (1, _) => g.swipe_right.as_ref(),
-        (-1, _) => g.swipe_left.as_ref(),
-        (_, 1) => g.swipe_down.as_ref(),
-        _ => g.swipe_up.as_ref(),
+        (1, _) => right.as_ref(),
+        (-1, _) => left.as_ref(),
+        (_, 1) => down.as_ref(),
+        _ => up.as_ref(),
     }
 }
 
@@ -157,6 +176,10 @@ fn expand_gestures(
         two_finger_tap,
         zoom_in,
         zoom_out,
+        two_finger_swipe_x_neg,
+        two_finger_swipe_x_pos,
+        two_finger_swipe_y_neg,
+        two_finger_swipe_y_pos,
     ] = GESTURES.map(key);
     let scroll = config.gestures.scroll;
     let decide_percent = config.gestures.two_finger_decide_percent.unwrap_or(4);
@@ -168,6 +191,14 @@ fn expand_gestures(
     }
     let zoom_cos_permille = (f64::from(zoom_angle).to_radians().cos() * 1000.0).round() as u16;
     let zoom_step_percent = config.gestures.zoom_step_percent.unwrap_or(6);
+    let swipe_percent = config.gestures.two_finger_swipe_percent.unwrap_or(25);
+    let swipe_angle = config.gestures.two_finger_swipe_angle.unwrap_or(30);
+    if swipe_angle >= 90 {
+        panic!(
+            "\n\u{274c} keyboard.toml: iqs5xx `two_finger_swipe_angle` must be below 90 degrees, got {swipe_angle}"
+        );
+    }
+    let swipe_cos_permille = (f64::from(swipe_angle).to_radians().cos() * 1000.0).round() as u16;
     quote! {
         ::rmk::input_device::iqs5xx::Iqs5xxGestures {
             single_tap: #single_tap,
@@ -180,10 +211,16 @@ fn expand_gestures(
             scroll: #scroll,
             zoom_in: #zoom_in,
             zoom_out: #zoom_out,
+            two_finger_swipe_x_neg: #two_finger_swipe_x_neg,
+            two_finger_swipe_x_pos: #two_finger_swipe_x_pos,
+            two_finger_swipe_y_neg: #two_finger_swipe_y_neg,
+            two_finger_swipe_y_pos: #two_finger_swipe_y_pos,
             two_finger: ::rmk::input_device::iqs5xx::TwoFingerConfig {
                 decide_percent: #decide_percent,
                 zoom_cos_permille: #zoom_cos_permille,
                 zoom_step_percent: #zoom_step_percent,
+                swipe_percent: #swipe_percent,
+                swipe_cos_permille: #swipe_cos_permille,
             },
         }
     }
@@ -523,6 +560,21 @@ i2c.scl = "P0_20"
                 (Side::Peripheral(0), 0, Gesture::SwipeXPos, "L".to_string()),
                 (Side::Peripheral(0), 0, Gesture::SwipeYPos, "D".to_string()),
             ]
+        );
+        // Two-finger swipes go through the same invert.
+        let board = split_board(
+            "swipe2",
+            "",
+            "proc_invert_x = true\ngestures.two_finger_swipe_right = \"R\"",
+        );
+        assert_eq!(
+            summary(&board),
+            vec![(
+                Side::Peripheral(0),
+                0,
+                Gesture::TwoFingerSwipeXNeg,
+                "R".to_string()
+            )]
         );
         // Swapped, sensor -Y is the cursor's -X: left.
         let board = split_board(

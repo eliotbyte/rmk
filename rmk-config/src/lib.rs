@@ -1422,6 +1422,17 @@ pub struct Iqs5xxGesturesConfig {
     /// How much the distance between the fingers changes per zoom step, in percent of
     /// the trackpad's longer side. Defaults to 6.
     pub zoom_step_percent: Option<u8>,
+    /// Two fingers moving together far in one direction: fires once per touch, in place
+    /// of scrolling that way. Directions are the cursor's, as for `swipe_*`.
+    pub two_finger_swipe_left: Option<String>,
+    pub two_finger_swipe_right: Option<String>,
+    pub two_finger_swipe_up: Option<String>,
+    pub two_finger_swipe_down: Option<String>,
+    /// How far the fingers move for a two-finger swipe, in percent of the trackpad's
+    /// longer side. Defaults to 25.
+    pub two_finger_swipe_percent: Option<u8>,
+    /// How many degrees a two-finger swipe may stray from its direction. Defaults to 30.
+    pub two_finger_swipe_angle: Option<u8>,
     /// Two-finger scrolling.
     #[serde(default)]
     pub scroll: bool,

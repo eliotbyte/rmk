@@ -99,6 +99,17 @@ zoom_out = "WM(Minus, LCtrl)"
 # zoom_angle = 25
 # Change of finger distance per zoom step, in percent of the longer side. Default: 6.
 # zoom_step_percent = 6
+# Two fingers moving together far in one direction fire once per touch, in place
+# of scrolling that way; lift the fingers to swipe again. Directions are the
+# cursor's. E.g. back / forward:
+# two_finger_swipe_right = "MouseBtn4"
+# two_finger_swipe_left = "MouseBtn5"
+# two_finger_swipe_up = "..."
+# two_finger_swipe_down = "..."
+# How far the fingers move, in percent of the longer side. Default: 25.
+# two_finger_swipe_percent = 25
+# How many degrees a swipe may stray from its direction. Default: 30.
+# two_finger_swipe_angle = 30
 # Two-finger scrolling.
 scroll = true
 # Trackpad movement per scroll step; larger scrolls slower. Default: 8.
@@ -123,6 +134,7 @@ On a split keyboard use `[split.central.input_device.iqs5xx.gestures]` or
 | `scroll` | Two fingers move the same way |
 | `zoom_in` / `zoom_out` | Two fingers move apart / together along the line between them |
 | `swipe_*` | One finger moves quickly in one direction |
+| `two_finger_swipe_*` | Two fingers move together far in one direction, once per touch |
 
 The IC's own scroll and zoom aren't used: its zoom only checks that the
 distance between the fingers changed, so fingers drifting apart while scrolling
@@ -130,7 +142,10 @@ zoom the page. Instead the driver reads both finger positions and, once they
 have moved `two_finger_decide_percent`, compares their directions: within 45° of
 each other is a scroll, opposite and along the line between the fingers (within
 `zoom_angle`) is a zoom. Anything else, such as rotating or moving one finger
-only, keeps waiting and ends up a scroll. The touch keeps that gesture until it
+only, keeps waiting and ends up a scroll. Moving together within
+`two_finger_swipe_angle` of a direction that has a `two_finger_swipe_*` is a
+swipe instead of a scroll: it fires once the fingers have moved
+`two_finger_swipe_percent`, and turns into a scroll if they veer off. The touch keeps that gesture until it
 is no longer exactly two fingers.
 
 Gestures press virtual keys (`KeyboardEventPos::Virtual`): their actions are in

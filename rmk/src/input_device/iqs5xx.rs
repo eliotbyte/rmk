@@ -142,8 +142,8 @@ struct GestureState {
 /// A finger position, in pixels.
 type Point = (i32, i32);
 
-/// Where a two-finger touch stands. Once it is a scroll or a zoom it stays one
-/// until it is no longer exactly two fingers.
+/// Where a two-finger touch stands. Once it is a scroll, a zoom or a finished
+/// swipe it stays one until it is no longer exactly two fingers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TwoFingerState {
     #[default]
@@ -159,6 +159,15 @@ enum TwoFingerState {
     Zooming {
         base: u32,
     },
+    /// Moving together along `dir`, which has a two-finger swipe: `key` fires once the
+    /// fingers are far enough from `start`.
+    Swiping {
+        start: [Point; 2],
+        dir: Point,
+        key: u8,
+    },
+    /// The swipe fired; the touch does nothing more.
+    Done,
 }
 
 /// How two-finger scroll and zoom are told apart.
@@ -173,6 +182,12 @@ pub struct TwoFingerConfig {
     /// How much the distance between the fingers changes per zoom step, in percent of
     /// the trackpad's longer side.
     pub zoom_step_percent: u8,
+    /// How far both fingers move together for a two-finger swipe, in percent of the
+    /// trackpad's longer side.
+    pub swipe_percent: u8,
+    /// A two-finger swipe keeps within this angle of its axis; it's `cos(angle)` in
+    /// permille (30° is 866).
+    pub swipe_cos_permille: u16,
 }
 
 impl Default for TwoFingerConfig {
@@ -181,6 +196,8 @@ impl Default for TwoFingerConfig {
             decide_percent: 4,
             zoom_cos_permille: 906,
             zoom_step_percent: 6,
+            swipe_percent: 25,
+            swipe_cos_permille: 866,
         }
     }
 }
@@ -191,6 +208,8 @@ struct TwoFingerPx {
     decide: u32,
     zoom_step: u32,
     zoom_cos_permille: u32,
+    swipe: u32,
+    swipe_cos_permille: u32,
 }
 
 impl TwoFingerPx {
@@ -199,6 +218,8 @@ impl TwoFingerPx {
             decide: u32::from(percent_of(span, config.decide_percent)),
             zoom_step: u32::from(percent_of(span, config.zoom_step_percent)).max(1),
             zoom_cos_permille: u32::from(config.zoom_cos_permille.min(1000)),
+            swipe: u32::from(percent_of(span, config.swipe_percent)).max(1),
+            swipe_cos_permille: u32::from(config.swipe_cos_permille.min(1000)),
         }
     }
 }
@@ -224,7 +245,13 @@ pub struct Iqs5xxGestures {
     /// Two fingers moving apart / together: tapped once per zoom step.
     pub zoom_in: Option<u8>,
     pub zoom_out: Option<u8>,
-    /// How two-finger scroll and zoom are recognized.
+    /// Two fingers moving together far along a sensor axis: tapped once per touch,
+    /// in place of scrolling that way.
+    pub two_finger_swipe_x_neg: Option<u8>,
+    pub two_finger_swipe_x_pos: Option<u8>,
+    pub two_finger_swipe_y_neg: Option<u8>,
+    pub two_finger_swipe_y_pos: Option<u8>,
+    /// How two-finger gestures are recognized.
     pub two_finger: TwoFingerConfig,
 }
 
@@ -252,6 +279,21 @@ impl Iqs5xxGestures {
 
     fn zoom(&self) -> bool {
         self.zoom_in.is_some() || self.zoom_out.is_some()
+    }
+
+    /// Each two-finger swipe's direction and key.
+    fn two_finger_swipes(&self) -> [(Point, Option<u8>); 4] {
+        [
+            ((-1, 0), self.two_finger_swipe_x_neg),
+            ((1, 0), self.two_finger_swipe_x_pos),
+            ((0, -1), self.two_finger_swipe_y_neg),
+            ((0, 1), self.two_finger_swipe_y_pos),
+        ]
+    }
+
+    /// Whether the driver tracks two-finger touches at all.
+    fn two_finger_motion(&self) -> bool {
+        self.scroll || self.zoom() || self.two_finger_swipes().iter().any(|(_, key)| key.is_some())
     }
 }
 
@@ -285,6 +327,12 @@ fn sub(a: Point, b: Point) -> Point {
 
 fn dot(a: Point, b: Point) -> i64 {
     i64::from(a.0) * i64::from(b.0) + i64::from(a.1) * i64::from(b.1)
+}
+
+/// The average motion of the two fingers from `from` to `to`.
+fn average(from: [Point; 2], to: [Point; 2]) -> Point {
+    let (d1, d2) = (sub(to[0], from[0]), sub(to[1], from[1]));
+    ((d1.0 + d2.0) / 2, (d1.1 + d2.1) / 2)
 }
 
 fn len(a: Point) -> u32 {
@@ -382,7 +430,7 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
         }
         return out;
     }
-    if !gestures.scroll && !gestures.zoom() {
+    if !gestures.two_finger_motion() {
         return out;
     }
 
@@ -390,7 +438,18 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
     state.two_finger = match state.two_finger {
         TwoFingerState::Idle => TwoFingerState::Deciding { start: now },
         TwoFingerState::Deciding { start } => match classify(start, now, px, gestures.zoom()) {
-            Some(TwoFinger::Scroll) => TwoFingerState::Scrolling { last: now },
+            // Moving together: a swipe if that way has one, a scroll otherwise.
+            Some(TwoFinger::Scroll) => {
+                let moved = average(start, now);
+                let swipe = gestures.two_finger_swipes().into_iter().find_map(|(dir, key)| {
+                    let key = key?;
+                    within_angle(moved, dir, px.swipe_cos_permille, false).then_some((dir, key))
+                });
+                match swipe {
+                    Some((dir, key)) => TwoFingerState::Swiping { start, dir, key },
+                    None => TwoFingerState::Scrolling { last: now },
+                }
+            }
             Some(TwoFinger::Zoom) => TwoFingerState::Zooming {
                 base: len(sub(start[1], start[0])),
             },
@@ -405,7 +464,19 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
             }
             TwoFingerState::Scrolling { last: now }
         }
-        zooming @ TwoFingerState::Zooming { .. } => zooming,
+        TwoFingerState::Swiping { start, dir, key } => {
+            let moved = average(start, now);
+            if !within_angle(moved, dir, px.swipe_cos_permille, false) {
+                // Turned away from the swipe: scroll instead.
+                TwoFingerState::Scrolling { last: now }
+            } else if dot(moved, dir) >= i64::from(px.swipe) {
+                tap(Some(key), &mut out);
+                TwoFingerState::Done
+            } else {
+                TwoFingerState::Swiping { start, dir, key }
+            }
+        }
+        unchanged @ (TwoFingerState::Zooming { .. } | TwoFingerState::Done) => unchanged,
     };
     // At most one zoom step per cycle; the rest follow on the next cycles.
     if let TwoFingerState::Zooming { base } = &mut state.two_finger {
@@ -786,18 +857,28 @@ mod tests {
         scroll: true,
         zoom_in: Some(7),
         zoom_out: Some(8),
+        // Sideways only, so vertical two-finger motion still scrolls.
+        two_finger_swipe_x_neg: Some(9),
+        two_finger_swipe_x_pos: Some(10),
+        two_finger_swipe_y_neg: None,
+        two_finger_swipe_y_pos: None,
         two_finger: TwoFingerConfig {
             decide_percent: 4,
             zoom_cos_permille: 906,
             zoom_step_percent: 6,
+            swipe_percent: 20,
+            swipe_cos_permille: 866,
         },
     };
 
-    /// A 1000-pixel trackpad: deciding at 40 px, a zoom step every 60 px.
+    /// A 1000-pixel trackpad: deciding at 40 px, a zoom step every 60 px, a swipe at
+    /// 200 px within 30°.
     const PX: TwoFingerPx = TwoFingerPx {
         decide: 40,
         zoom_step: 60,
         zoom_cos_permille: 906,
+        swipe: 200,
+        swipe_cos_permille: 866,
     };
 
     fn one_finger(gesture_events_0: u8, dx: i16, dy: i16) -> Motion {
@@ -973,6 +1054,56 @@ mod tests {
     }
 
     #[test]
+    fn a_long_sideways_two_finger_move_swipes_once_per_touch() {
+        let (outs, _) = run(&[
+            two_fingers((700, 500), (900, 500)),
+            two_fingers((680, 501), (880, 502)), // decided: together, sideways
+            two_fingers((600, 505), (800, 505)), // 100 px: not far enough yet
+            two_fingers((490, 505), (690, 506)), // 210 px: swipe
+            two_fingers((270, 505), (470, 505)), // another 220 px: done until the fingers lift
+            lifted(),
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((420, 499), (620, 498)),
+            two_fingers((620, 495), (820, 495)), // the other way
+        ]);
+        assert_eq!(keys(&outs), vec![(9, true), (9, false), (10, true), (10, false)]);
+        assert!(axes(&outs).is_empty());
+    }
+
+    #[test]
+    fn a_short_sideways_move_does_nothing() {
+        let (outs, state) = run(&[
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((380, 500), (580, 500)),
+            two_fingers((300, 500), (500, 500)),
+        ]);
+        assert!(keys(&outs).is_empty() && axes(&outs).is_empty());
+        assert!(matches!(state.two_finger, TwoFingerState::Swiping { .. }));
+    }
+
+    #[test]
+    fn a_swipe_that_turns_vertical_scrolls() {
+        let (outs, state) = run(&[
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((380, 500), (580, 500)), // sideways: a swipe so far
+            two_fingers((380, 560), (580, 560)), // now mostly down: scroll
+            two_fingers((380, 570), (580, 570)),
+        ]);
+        assert!(keys(&outs).is_empty());
+        assert_eq!(axes(&outs), vec![[(Axis::H, 0), (Axis::V, 10)]]);
+        assert!(matches!(state.two_finger, TwoFingerState::Scrolling { .. }));
+    }
+
+    #[test]
+    fn a_diagonal_two_finger_move_is_not_a_swipe() {
+        let (_, state) = run(&[
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((370, 530), (570, 530)), // 45°: outside the 30° of a swipe
+        ]);
+        assert!(matches!(state.two_finger, TwoFingerState::Scrolling { .. }));
+    }
+
+    #[test]
     fn a_third_finger_ends_the_two_finger_gesture() {
         let mut three = two_fingers((0, 0), (0, 0));
         three.fingers = 3;
@@ -995,7 +1126,9 @@ mod tests {
             TwoFingerPx {
                 decide: 40,
                 zoom_step: 60,
-                zoom_cos_permille: 906
+                zoom_cos_permille: 906,
+                swipe: 250,
+                swipe_cos_permille: 866,
             }
         );
     }
