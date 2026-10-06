@@ -84,7 +84,9 @@ name = "trackpad0"
 
 [input_device.iqs5xx.gestures]
 single_tap = "MouseBtn1"
-# Held while the finger rests, and the cursor still moves: drag and drop.
+# A finger resting still starts a drag: the action is held until no finger is
+# left on the trackpad, so another finger can land and carry on when the first
+# runs out of room; the finger that landed last moves the cursor.
 press_and_hold = "MouseBtn1"
 two_finger_tap = "MouseBtn2"
 # Once per zoom step; Ctrl + = / Ctrl + - zoom most apps.
@@ -150,7 +152,7 @@ On a split keyboard use `[split.central.input_device.iqs5xx.gestures]` or
 | Gesture | When it fires |
 |---|---|
 | `single_tap` | One finger touches and lifts without moving |
-| `press_and_hold` | One finger stays still; the action is held until the finger lifts |
+| `press_and_hold` | One finger stays still; the action is held until every finger lifts |
 | `two_finger_tap` | Two fingers tap together |
 | `scroll` | Two fingers move the same way |
 | `zoom_in` / `zoom_out` | Two fingers move apart / together along the line between them |

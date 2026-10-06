@@ -1399,8 +1399,9 @@ pub struct Iqs5xxConfig {
 pub struct Iqs5xxGesturesConfig {
     /// One-finger tap, e.g. `"MouseBtn1"`.
     pub single_tap: Option<String>,
-    /// One finger held still: the action stays pressed until the finger lifts, and
-    /// the cursor moves meanwhile. `"MouseBtn1"` gives drag-and-drop.
+    /// One finger held still starts a drag: the action stays pressed until no finger
+    /// is left, so another finger can take over; the one that landed last moves the
+    /// cursor. `"MouseBtn1"` gives drag-and-drop.
     pub press_and_hold: Option<String>,
     /// Two-finger tap, e.g. `"MouseBtn2"`.
     pub two_finger_tap: Option<String>,

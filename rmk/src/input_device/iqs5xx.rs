@@ -135,10 +135,58 @@ where
 /// Gesture state carried from one cycle to the next.
 #[derive(Debug, Default)]
 struct GestureState {
-    /// Whether the press-and-hold virtual key is down.
-    holding: bool,
+    /// The press-and-hold drag in progress, its key down.
+    drag: Option<Drag>,
     two_finger: TwoFingerState,
     touch: Touch,
+}
+
+/// A press-and-hold drag. The key stays down while any finger touches, so another
+/// finger can take over when the first runs out of room; the finger that landed
+/// last moves the cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Drag {
+    /// Which finger slots were down last cycle.
+    present: [bool; 3],
+    /// The slot moving the cursor, and where it was last cycle.
+    lead: Option<(usize, Point)>,
+}
+
+impl Drag {
+    fn start(motion: &Motion) -> Self {
+        Self {
+            present: motion.present,
+            lead: Self::any_finger(motion),
+        }
+    }
+
+    fn any_finger(motion: &Motion) -> Option<(usize, Point)> {
+        (0..3).find(|&i| motion.present[i]).map(|i| (i, motion.points[i]))
+    }
+
+    /// This cycle's cursor motion. A finger landing takes the lead without moving the
+    /// cursor; when the lead lifts, a remaining finger takes over from where it is. A
+    /// step longer than `jump` is the IC renumbering fingers, not motion.
+    fn follow(&mut self, motion: &Motion, jump: u32) -> Point {
+        let landed = (0..3).find(|&i| motion.present[i] && !self.present[i]);
+        self.present = motion.present;
+        if let Some(i) = landed {
+            self.lead = Some((i, motion.points[i]));
+            return (0, 0);
+        }
+        match self.lead {
+            Some((i, last)) if motion.present[i] => {
+                let now = motion.points[i];
+                self.lead = Some((i, now));
+                let step = sub(now, last);
+                if len(step) > jump { (0, 0) } else { step }
+            }
+            _ => {
+                self.lead = Self::any_finger(motion);
+                (0, 0)
+            }
+        }
+    }
 }
 
 /// One touch: from the first finger landing until no finger is left.
@@ -297,8 +345,8 @@ impl TwoFingerPx {
 pub struct Iqs5xxGestures {
     /// One-finger tap: the key is tapped when the finger lifts (§6.1).
     pub single_tap: Option<u8>,
-    /// One finger held still: the key stays pressed until the finger lifts, and the
-    /// cursor moves meanwhile, which makes a drag (§6.2).
+    /// One finger held still starts a drag (§6.2): the key stays pressed until no
+    /// finger is left, and the finger that landed last moves the cursor.
     pub press_and_hold: Option<u8>,
     /// One-finger swipes along the sensor axes (§6.3). The cursor moves as well.
     pub swipe_x_neg: Option<u8>,
@@ -397,8 +445,11 @@ struct Motion {
     fingers: u8,
     dx: i16,
     dy: i16,
-    /// Absolute positions of fingers 1 to 3; meaningful while that many are down.
+    /// Absolute positions of fingers 1 to 3, meaningful where `present`.
     points: [Point; 3],
+    /// Which of the three finger slots hold a finger (nonzero touch strength). A
+    /// finger keeps its slot while others land or lift (§5.2.6).
+    present: [bool; 3],
     /// When the cycle was read.
     at_ms: u64,
 }
@@ -417,6 +468,10 @@ fn sub(a: Point, b: Point) -> Point {
 
 fn dot(a: Point, b: Point) -> i64 {
     i64::from(a.0) * i64::from(b.0) + i64::from(a.1) * i64::from(b.1)
+}
+
+fn clamp16(x: i32) -> i16 {
+    x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
 /// The average motion of three fingers from `from` to `to`.
@@ -495,12 +550,28 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
     };
     let g0 = motion.gesture_events_0;
 
-    let hold = g0 & 0b10 != 0;
-    if let Some(key) = gestures.press_and_hold
-        && hold != state.holding
-    {
-        state.holding = hold;
-        let _ = out.keys.push((key, hold));
+    // A drag keeps the key down until no finger is left, and nothing else happens
+    // meanwhile: no taps, scrolling or other gestures.
+    if let Some(key) = gestures.press_and_hold {
+        if let Some(drag) = &mut state.drag {
+            if motion.fingers == 0 {
+                let _ = out.keys.push((key, false));
+                state.drag = None;
+            } else {
+                let (dx, dy) = drag.follow(motion, px.decide * 4);
+                if (dx, dy) != (0, 0) {
+                    out.axes = Some([(Axis::X, clamp16(dx)), (Axis::Y, clamp16(dy))]);
+                }
+            }
+            state.two_finger = TwoFingerState::Idle;
+            state.touch = Touch::default();
+            return out;
+        }
+        if g0 & 0b10 != 0 {
+            let _ = out.keys.push((key, true));
+            state.drag = Some(Drag::start(motion));
+            return out;
+        }
     }
     if g0 & 0b1 != 0 {
         tap(gestures.single_tap, &mut out);
@@ -532,8 +603,7 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
             ScrollAxis::Vertical => (0, moved.1),
         };
         if gestures.scroll && moved != (0, 0) {
-            let clamp = |x: i32| x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-            out.axes = Some([(Axis::H, clamp(moved.0)), (Axis::V, clamp(moved.1))]);
+            out.axes = Some([(Axis::H, clamp16(moved.0)), (Axis::V, clamp16(moved.1))]);
         }
     };
 
@@ -939,6 +1009,7 @@ where
             (coordinate(at), coordinate(at + 2))
         };
         let points = [point(10), point(17), point(24)];
+        let present = [10, 17, 24].map(|at| data[at + 4] != 0 || data[at + 5] != 0);
 
         // §8.10.3: system_info_0.
         let charging_mode = match system_info_0 & 0b111 {
@@ -979,6 +1050,7 @@ where
             dx,
             dy,
             points,
+            present,
             at_ms: Instant::now().as_millis(),
         })
     }
@@ -997,10 +1069,9 @@ where
             // can reset and require re-initialization.
             // A reset mid-drag must not leave the press-and-hold key down.
             if !self.initialized
-                && self.state.holding
+                && self.state.drag.take().is_some()
                 && let Some(key) = self.gestures.press_and_hold
             {
-                self.state.holding = false;
                 Self::publish_virtual_key(key, false).await;
             }
             if !self.initialized
@@ -1099,6 +1170,7 @@ mod tests {
             dx,
             dy,
             points: [(0, 0); 3],
+            present: [true, false, false],
             at_ms: 0,
         }
     }
@@ -1115,6 +1187,7 @@ mod tests {
             dx: 0,
             dy: 0,
             points: [a, b, (0, 0)],
+            present: [true, true, false],
             at_ms,
         }
     }
@@ -1123,6 +1196,7 @@ mod tests {
         Motion {
             fingers: 3,
             points: [a, b, c],
+            present: [true; 3],
             ..two_fingers_at(at_ms, a, b)
         }
     }
@@ -1134,6 +1208,7 @@ mod tests {
     fn lifted() -> Motion {
         Motion {
             fingers: 0,
+            present: [false; 3],
             ..one_finger(0, 0, 0)
         }
     }
@@ -1194,15 +1269,91 @@ mod tests {
         }
     }
 
+    /// A cycle with the given finger slots down; `hold` sets the IC's press-and-hold.
+    fn slots(hold: bool, s: [Option<Point>; 3]) -> Motion {
+        Motion {
+            gesture_events_0: if hold { 0b10 } else { 0 },
+            gesture_events_1: 0,
+            fingers: s.iter().filter(|p| p.is_some()).count() as u8,
+            dx: 0,
+            dy: 0,
+            points: s.map(|p| p.unwrap_or((0, 0))),
+            present: s.map(|p| p.is_some()),
+            at_ms: 0,
+        }
+    }
+
     #[test]
     fn press_and_hold_stays_down_and_drags() {
-        let (outs, state) = run(&[one_finger(0b10, 0, 0), one_finger(0b10, 5, 1)]);
+        let (outs, state) = run(&[
+            slots(true, [Some((100, 100)), None, None]),
+            slots(true, [Some((105, 101)), None, None]),
+        ]);
         assert_eq!(keys(&outs), vec![(1, true)]);
         assert_eq!(axes(&outs), vec![[(Axis::X, 5), (Axis::Y, 1)]]);
-        assert!(state.holding);
-        let (outs, state) = run(&[one_finger(0b10, 0, 0), lifted()]);
+        assert!(state.drag.is_some());
+        let (outs, state) = run(&[slots(true, [Some((100, 100)), None, None]), lifted()]);
         assert_eq!(keys(&outs), vec![(1, true), (1, false)]);
-        assert!(!state.holding);
+        assert!(state.drag.is_none());
+    }
+
+    #[test]
+    fn a_drag_goes_on_while_any_finger_touches_and_follows_the_last_one() {
+        let (outs, _) = run(&[
+            slots(true, [Some((100, 100)), None, None]),
+            slots(false, [Some((100, 100)), Some((300, 300)), None]), // a second finger lands
+            slots(false, [Some((100, 100)), Some((310, 300)), None]), // and leads
+            slots(false, [None, Some((315, 300)), None]),             // the first lifts
+            slots(false, [Some((120, 120)), Some((315, 300)), None]), // and lands again: leads
+            slots(false, [Some((125, 121)), Some((315, 300)), None]),
+            slots(false, [Some((126, 121)), None, None]), // the second lifts
+            lifted(),
+        ]);
+        assert_eq!(keys(&outs), vec![(1, true), (1, false)]);
+        assert_eq!(
+            axes(&outs),
+            vec![
+                [(Axis::X, 10), (Axis::Y, 0)],
+                [(Axis::X, 5), (Axis::Y, 0)],
+                [(Axis::X, 5), (Axis::Y, 1)],
+                [(Axis::X, 1), (Axis::Y, 0)],
+            ]
+        );
+    }
+
+    #[test]
+    fn when_the_lead_lifts_the_other_finger_takes_over_without_a_jump() {
+        let (outs, _) = run(&[
+            slots(true, [Some((100, 100)), None, None]),
+            slots(false, [Some((100, 100)), Some((300, 300)), None]),
+            slots(false, [Some((102, 100)), None, None]), // the lead lifts
+            slots(false, [Some((107, 100)), None, None]),
+        ]);
+        assert_eq!(axes(&outs), vec![[(Axis::X, 5), (Axis::Y, 0)]]);
+    }
+
+    #[test]
+    fn a_drag_ignores_a_finger_jumping_across_the_trackpad() {
+        let (outs, _) = run(&[
+            slots(true, [Some((100, 100)), None, None]),
+            slots(false, [Some((600, 100)), None, None]), // 500 px in one cycle
+            slots(false, [Some((604, 100)), None, None]),
+        ]);
+        assert_eq!(axes(&outs), vec![[(Axis::X, 4), (Axis::Y, 0)]]);
+    }
+
+    #[test]
+    fn nothing_else_happens_during_a_drag() {
+        let mut two_finger_tap = slots(false, [Some((100, 100)), Some((300, 300)), None]);
+        two_finger_tap.gesture_events_1 = 0b1;
+        let (outs, _) = run(&[
+            slots(true, [Some((100, 100)), None, None]),
+            slots(false, [Some((100, 100)), Some((300, 300)), None]),
+            two_finger_tap,
+            slots(false, [Some((100, 160)), Some((300, 360)), None]), // would scroll
+        ]);
+        assert_eq!(keys(&outs), vec![(1, true)]);
+        assert_eq!(axes(&outs), vec![[(Axis::X, 0), (Axis::Y, 60)]]);
     }
 
     #[test]
