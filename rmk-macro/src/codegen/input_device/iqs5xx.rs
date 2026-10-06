@@ -1,5 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use rmk_config::Iqs5xxAccelerationConfig;
 use rmk_config::resolved::hardware::{
     BoardConfig, ChipModel, ChipSeries, InputDeviceConfig, Iqs5xxConfig,
 };
@@ -169,6 +170,19 @@ pub(crate) fn gesture_keys(board: &BoardConfig) -> Vec<GestureKey> {
     keys
 }
 
+/// An optional `Acceleration` literal.
+fn expand_acceleration(acceleration: &Option<Iqs5xxAccelerationConfig>) -> TokenStream {
+    match acceleration {
+        Some(Iqs5xxAccelerationConfig { from, max }) => quote! {
+            Some(::rmk::input_device::iqs5xx::Acceleration {
+                from_percent_per_s: #from,
+                max_percent: #max,
+            })
+        },
+        None => quote! { None },
+    }
+}
+
 /// The `Iqs5xxGestures` of trackpad `device` on `side`.
 fn expand_gestures(
     board: &BoardConfig,
@@ -209,6 +223,7 @@ fn expand_gestures(
     ] = GESTURES.map(key);
     let scroll = config.gestures.scroll;
     let scroll_both_axes = config.gestures.scroll_both_axes;
+    let scroll_acceleration = expand_acceleration(&config.gestures.scroll_acceleration);
     let decide_percent = config.gestures.two_finger_decide_percent.unwrap_or(4);
     let zoom_angle = config.gestures.zoom_angle.unwrap_or(25);
     if zoom_angle >= 90 {
@@ -261,6 +276,7 @@ fn expand_gestures(
                 three_swipe_percent: #three_swipe_percent,
                 three_tap_ms: #three_tap_ms,
             },
+            scroll_acceleration: #scroll_acceleration,
         }
     }
 }
@@ -311,6 +327,15 @@ pub(crate) fn expand_iqs5xx_device(
         let proc_invert_y = sensor.proc_invert_y;
         let proc_swap_xy = sensor.proc_swap_xy;
         let gestures = expand_gestures(board, side, idx, sensor);
+        let cursor_acceleration = match &sensor.cursor_acceleration {
+            Some(Iqs5xxAccelerationConfig { from, max }) => quote! {
+                .with_cursor_acceleration(::rmk::input_device::iqs5xx::Acceleration {
+                    from_percent_per_s: #from,
+                    max_percent: #max,
+                })
+            },
+            None => quote! {},
+        };
         let scroll_divisor = sensor.gestures.scroll_divisor.unwrap_or(8);
         let natural_scroll = sensor.gestures.natural_scroll;
 
@@ -360,7 +385,7 @@ pub(crate) fn expand_iqs5xx_device(
                     #i2c_ident,
                     #rdy_ident,
                 )
-                .with_gestures(#gestures);
+                .with_gestures(#gestures)#cursor_acceleration;
             },
             ChipSeries::Rp2040 => quote! {
                 #rdy_init
@@ -376,7 +401,7 @@ pub(crate) fn expand_iqs5xx_device(
                     #i2c_ident,
                     #rdy_ident,
                 )
-                .with_gestures(#gestures);
+                .with_gestures(#gestures)#cursor_acceleration;
             },
             _ => unreachable!(),
         };

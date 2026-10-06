@@ -1389,6 +1389,20 @@ pub struct Iqs5xxConfig {
     /// The IC's built-in gestures and what they trigger. Off unless configured.
     #[serde(default)]
     pub gestures: Iqs5xxGesturesConfig,
+    /// Cursor acceleration. Off unless configured.
+    pub cursor_acceleration: Option<Iqs5xxAccelerationConfig>,
+}
+
+/// Pointer acceleration for the IQS5xx: motion faster than `from` is scaled up in
+/// proportion to its speed, up to `max`; slower motion passes unchanged.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Iqs5xxAccelerationConfig {
+    /// Speed where acceleration starts, in percent of the trackpad's longer side per
+    /// second.
+    pub from: u16,
+    /// The most motion is scaled up, in percent (250 = 2.5×).
+    pub max: u16,
 }
 
 /// IQS5xx gestures (`[input_device.iqs5xx.gestures]`). Each one set to an action is
@@ -1464,6 +1478,8 @@ pub struct Iqs5xxGesturesConfig {
     /// started along until the fingers lift.
     #[serde(default)]
     pub scroll_both_axes: bool,
+    /// Acceleration of two-finger scrolling. Off unless configured.
+    pub scroll_acceleration: Option<Iqs5xxAccelerationConfig>,
 }
 
 /// I²C bus configuration for the IQS5xx. Distinct from the generic `I2cConfig`

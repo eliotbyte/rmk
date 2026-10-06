@@ -70,6 +70,22 @@ name = ...
 For split keyboards the device runs on whichever side it's wired to; the
 matching `PointingProcessor` is generated on the central automatically.
 
+## Acceleration
+
+Fine positioning wants a slow cursor, crossing the screen a fast one.
+`cursor_acceleration` scales motion faster than `from` (percent of the
+trackpad's longer side per second) up in proportion to its speed, to at most
+`max` percent; slower motion passes unchanged. Off by default.
+
+```toml
+[[input_device.iqs5xx]]
+# ...
+# Twice the speed of a full trackpad length per second doubles the motion, up to 2.5×.
+cursor_acceleration = { from = 100, max = 250 }
+```
+
+`gestures.scroll_acceleration` does the same for two-finger scrolling.
+
 ## Gestures
 
 The IC recognizes taps, swipes, two-finger scrolling and pinch zoom on its own.
@@ -139,6 +155,8 @@ natural_scroll = true
 # Scroll along both axes at once. Off by default: a scroll keeps to the axis it
 # started along, vertical or horizontal, until the fingers lift.
 # scroll_both_axes = false
+# Scroll faster when the fingers move fast (see cursor_acceleration below).
+# scroll_acceleration = { from = 100, max = 300 }
 # One-finger swipes, by cursor direction. The cursor moves during a swipe too.
 # swipe_left = "..."
 # swipe_right = "..."

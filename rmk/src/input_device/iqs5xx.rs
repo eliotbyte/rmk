@@ -129,6 +129,20 @@ where
     /// `gestures.two_finger` in pixels of the resolution set at init.
     two_finger_px: TwoFingerPx,
 
+    /// Acceleration of cursor motion, if any.
+    cursor_acceleration: Option<Acceleration>,
+
+    /// The trackpad's longer side in pixels of the resolution set at init.
+    span: u32,
+
+    /// When the previous cycle was read.
+    last_at_ms: u64,
+
+    /// Fractions of a pixel that acceleration carries to the next cycle, for the cursor
+    /// and for scrolling.
+    cursor_rest: Point,
+    scroll_rest: Point,
+
     state: GestureState,
 }
 
@@ -296,6 +310,35 @@ impl Default for TwoFingerConfig {
     }
 }
 
+/// Pointer acceleration. Motion faster than `from_percent_per_s` of the trackpad's
+/// longer side per second is scaled up in proportion to its speed, up to
+/// `max_percent`; slower motion passes unchanged, so fine positioning keeps its
+/// precision while fast moves cover more ground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Acceleration {
+    pub from_percent_per_s: u16,
+    pub max_percent: u16,
+}
+
+/// `step`, taken over `dt_ms` on a trackpad `span` pixels long, under `accel`. `rest`
+/// carries the fractions of a pixel between calls.
+fn accelerate(step: Point, dt_ms: u64, span: u32, accel: Acceleration, rest: &mut Point) -> Point {
+    let from = u64::from(span) * u64::from(accel.from_percent_per_s) / 100;
+    let speed = u64::from(len(step)) * 1000 / dt_ms.max(1);
+    let gain = if from == 0 || speed <= from {
+        100
+    } else {
+        (speed * 100 / from).min(u64::from(accel.max_percent.max(100))) as i32
+    };
+    let scale = |d: i32, rest: &mut i32| {
+        let total = d * gain + *rest;
+        let out = total / 100;
+        *rest = total - out * 100;
+        out
+    };
+    (scale(step.0, &mut rest.0), scale(step.1, &mut rest.1))
+}
+
 /// [`TwoFingerConfig`] with distances in pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TwoFingerPx {
@@ -379,6 +422,8 @@ pub struct Iqs5xxGestures {
     pub three_finger_swipe_y_pos: Option<u8>,
     /// How two- and three-finger gestures are recognized.
     pub two_finger: TwoFingerConfig,
+    /// Acceleration of two-finger scrolling, if any.
+    pub scroll_acceleration: Option<Acceleration>,
 }
 
 impl Iqs5xxGestures {
@@ -834,8 +879,19 @@ where
             pointing_device_id: rmk_id,
             gestures: Iqs5xxGestures::default(),
             two_finger_px: TwoFingerPx::default(),
+            cursor_acceleration: None,
+            span: 0,
+            last_at_ms: 0,
+            cursor_rest: (0, 0),
+            scroll_rest: (0, 0),
             state: GestureState::default(),
         }
+    }
+
+    /// Accelerate cursor motion.
+    pub fn with_cursor_acceleration(mut self, acceleration: Acceleration) -> Self {
+        self.cursor_acceleration = Some(acceleration);
+        self
     }
 
     /// Enable the IC's gestures, each pressing its virtual key.
@@ -950,6 +1006,7 @@ where
         }
 
         self.two_finger_px = TwoFingerPx::new(&self.gestures.two_finger, x_resolution, y_resolution);
+        self.span = u32::from(x_resolution.max(y_resolution));
 
         i2c_tx(&mut self.i2c, "end_session", &mut [Operation::Write(&END_SESSION[..])]).await?;
 
@@ -1087,10 +1144,25 @@ where
             match self.read_motion().await {
                 Ok(motion) => {
                     let out = decode_cycle(&self.gestures, &self.two_finger_px, &motion, &mut self.state);
+                    let dt_ms = motion.at_ms.saturating_sub(self.last_at_ms);
+                    self.last_at_ms = motion.at_ms;
                     for (key, pressed) in out.keys {
                         Self::publish_virtual_key(key, pressed).await;
                     }
                     if let Some([(axis_a, a), (axis_b, b)]) = out.axes {
+                        let span = self.span;
+                        let (acceleration, rest) = if axis_a == Axis::X {
+                            (self.cursor_acceleration, &mut self.cursor_rest)
+                        } else {
+                            (self.gestures.scroll_acceleration, &mut self.scroll_rest)
+                        };
+                        let (a, b) = match acceleration {
+                            Some(acceleration) => {
+                                let (a, b) = accelerate((i32::from(a), i32::from(b)), dt_ms, span, acceleration, rest);
+                                (clamp16(a), clamp16(b))
+                            }
+                            None => (a, b),
+                        };
                         let rel = |axis, value| AxisEvent {
                             typ: AxisValType::Rel,
                             axis,
@@ -1147,6 +1219,7 @@ mod tests {
             three_swipe_percent: 15,
             three_tap_ms: 300,
         },
+        scroll_acceleration: None,
     };
 
     /// A 1000-pixel trackpad: deciding at 40 px, a zoom step every 60 px, a swipe of
@@ -1637,6 +1710,37 @@ mod tests {
             three,
         ]);
         assert_eq!(state.two_finger, TwoFingerState::Idle);
+    }
+
+    /// From 100% of a 1000-pixel trackpad per second, so 1000 px/s, up to 2.5×.
+    const ACCEL: Acceleration = Acceleration {
+        from_percent_per_s: 100,
+        max_percent: 250,
+    };
+
+    #[test]
+    fn slow_motion_is_not_accelerated() {
+        let mut rest = (0, 0);
+        // 5 px in 10 ms is 500 px/s, below 1000.
+        assert_eq!(accelerate((5, -3), 10, 1000, ACCEL, &mut rest), (5, -3));
+        assert_eq!(rest, (0, 0));
+    }
+
+    #[test]
+    fn fast_motion_gains_in_proportion_to_its_speed_up_to_the_max() {
+        let mut rest = (0, 0);
+        // 2000 px/s: twice the threshold, twice the motion.
+        assert_eq!(accelerate((20, 0), 10, 1000, ACCEL, &mut rest), (40, 0));
+        // 10000 px/s would be 10×, capped at 2.5×.
+        assert_eq!(accelerate((100, 0), 10, 1000, ACCEL, &mut rest), (250, 0));
+    }
+
+    #[test]
+    fn acceleration_carries_fractions_over() {
+        let mut rest = (0, 0);
+        // 1500 px/s: 1.5 × 15 = 22.5, then 22.5 + 0.5 left over = 23.
+        assert_eq!(accelerate((15, 0), 10, 1000, ACCEL, &mut rest), (22, 0));
+        assert_eq!(accelerate((15, 0), 10, 1000, ACCEL, &mut rest), (23, 0));
     }
 
     #[test]
