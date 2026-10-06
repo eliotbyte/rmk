@@ -369,3 +369,163 @@ pub(crate) fn expand_virtual_keys(board: &BoardConfig) -> TokenStream {
         };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rmk_config::KeyboardTomlConfig;
+
+    use super::*;
+
+    /// A split board with a trackpad on each half; `central` and `peripheral` go into
+    /// their `[...iqs5xx]` tables, gestures included.
+    fn split_board(name: &str, central: &str, peripheral: &str) -> BoardConfig {
+        let path = std::env::temp_dir().join(format!(
+            "rmk-macro-iqs5xx-{name}-{}.toml",
+            std::process::id()
+        ));
+        let toml = format!(
+            r#"
+[keyboard]
+name = "gestures"
+vendor_id = 0x4c4b
+product_id = 0x4643
+chip = "nrf52840"
+
+[layout]
+rows = 1
+cols = 2
+
+[split]
+connection = "ble"
+
+[split.central]
+rows = 1
+cols = 1
+row_offset = 0
+col_offset = 0
+
+[split.central.matrix]
+matrix_type = "normal"
+row_pins = ["P0_02"]
+col_pins = ["P0_03"]
+
+[[split.central.input_device.iqs5xx]]
+name = "left"
+i2c.instance = "TWISPI0"
+i2c.sda = "P0_17"
+i2c.scl = "P0_20"
+{central}
+
+[[split.peripheral]]
+rows = 1
+cols = 1
+row_offset = 0
+col_offset = 1
+
+[split.peripheral.matrix]
+matrix_type = "normal"
+row_pins = ["P0_02"]
+col_pins = ["P0_03"]
+
+[[split.peripheral.input_device.iqs5xx]]
+name = "right"
+i2c.instance = "TWISPI0"
+i2c.sda = "P0_17"
+i2c.scl = "P0_20"
+{peripheral}
+"#
+        );
+        std::fs::write(&path, toml).unwrap();
+        let hardware = KeyboardTomlConfig::new_from_toml_path(&path).hardware();
+        std::fs::remove_file(&path).ok();
+        hardware.unwrap_or_else(|e| panic!("{e}")).board
+    }
+
+    fn summary(board: &BoardConfig) -> Vec<(Side, usize, Gesture, String)> {
+        gesture_keys(board)
+            .into_iter()
+            .map(|k| (k.side, k.device, k.gesture, k.action))
+            .collect()
+    }
+
+    #[test]
+    fn gestures_are_numbered_central_first_in_gesture_order() {
+        let board = split_board(
+            "order",
+            "gestures.zoom_out = \"A\"\ngestures.single_tap = \"MouseBtn1\"",
+            "gestures.two_finger_tap = \"MouseBtn2\"\ngestures.press_and_hold = \"B\"",
+        );
+        assert_eq!(
+            summary(&board),
+            vec![
+                (
+                    Side::Central,
+                    0,
+                    Gesture::SingleTap,
+                    "MouseBtn1".to_string()
+                ),
+                (Side::Central, 0, Gesture::ZoomOut, "A".to_string()),
+                (
+                    Side::Peripheral(0),
+                    0,
+                    Gesture::PressAndHold,
+                    "B".to_string()
+                ),
+                (
+                    Side::Peripheral(0),
+                    0,
+                    Gesture::TwoFingerTap,
+                    "MouseBtn2".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_peripheral_driver_gets_the_centrals_numbering() {
+        let board = split_board(
+            "driver",
+            "gestures.single_tap = \"MouseBtn1\"",
+            "gestures.two_finger_tap = \"MouseBtn2\"\ngestures.scroll = true",
+        );
+        let config = &trackpads(&board, Side::Peripheral(0))[0];
+        let tokens = expand_gestures(&board, Side::Peripheral(0), 0, config).to_string();
+        assert!(tokens.contains("two_finger_tap : Some (1u8)"), "{tokens}");
+        assert!(tokens.contains("single_tap : None"), "{tokens}");
+        assert!(tokens.contains("scroll : true"), "{tokens}");
+    }
+
+    #[test]
+    fn swipes_follow_the_cursor_through_invert_and_swap() {
+        // With X inverted, moving along sensor +X moves the cursor left.
+        let board = split_board(
+            "swipe",
+            "",
+            "proc_invert_x = true\ngestures.swipe_left = \"L\"\ngestures.swipe_down = \"D\"",
+        );
+        assert_eq!(
+            summary(&board),
+            vec![
+                (Side::Peripheral(0), 0, Gesture::SwipeXPos, "L".to_string()),
+                (Side::Peripheral(0), 0, Gesture::SwipeYPos, "D".to_string()),
+            ]
+        );
+        // Swapped, sensor -Y is the cursor's -X: left.
+        let board = split_board(
+            "swap",
+            "",
+            "proc_swap_xy = true\ngestures.swipe_left = \"L\"",
+        );
+        assert_eq!(
+            summary(&board),
+            vec![(Side::Peripheral(0), 0, Gesture::SwipeYNeg, "L".to_string())]
+        );
+    }
+
+    #[test]
+    fn no_gestures_leave_the_virtual_key_table_alone() {
+        let board = split_board("none", "", "");
+        assert!(gesture_keys(&board).is_empty());
+        assert!(expand_virtual_keys(&board).is_empty());
+    }
+}
