@@ -19,6 +19,7 @@ use super::entry::expand_rmk_entry;
 use super::feature::{get_rmk_features, is_feature_enabled};
 use super::import::expand_custom_imports;
 use super::input_device::expand_input_device_config;
+use super::input_device::iqs5xx::expand_virtual_keys;
 use super::keyboard_config::{
     expand_keyboard_info, expand_lock_config, expand_vial_config, read_keyboard_toml_config,
 };
@@ -364,6 +365,7 @@ fn expand_main(
     let usb_init = expand_usb_init(hardware, &item_mod);
     let flash_init = expand_flash_init(hardware, hardware.dfu.as_ref());
     let behavior_config = expand_behavior_config(behavior);
+    let virtual_keys = expand_virtual_keys(&hardware.board);
     let matrix_config = expand_matrix_config(hardware, rmk_features);
     let output_config = expand_output_config(hardware);
     let (ble_config, set_ble_config) = expand_ble_config(hardware);
@@ -509,6 +511,7 @@ fn expand_main(
 
             // Initialize behavior config config as `behavior_config`
             #behavior_config
+            #virtual_keys
 
             // Initialize matrix config as `(row_pins, col_pins)` or `direct_pins`
             #matrix_config

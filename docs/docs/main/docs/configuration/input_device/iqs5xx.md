@@ -8,9 +8,9 @@ trackpad modules.
 
 - `keyboard.toml` configuration is supported on nRF52 and RP2040 only; other chips
   need the [Rust API](#rust-configuration).
-- Currently only relative single-finger cursor movement is reported. Gestures,
-  multi-finger absolute positions, pressure, area, and raw channel data are
-  read from the IC but not yet published as RMK events.
+- Relative single-finger cursor movement and the IC's built-in
+  [gestures](#gestures) are reported. Multi-finger absolute positions,
+  pressure, area, and raw channel data are not.
 - Scaling is not supported yet; cursor movements will likely feel fast and
   imprecise.
 - An `RDY` (ready) pin is strongly recommended. Without it, the driver falls
@@ -70,6 +70,56 @@ name = ...
 For split keyboards the device runs on whichever side it's wired to; the
 matching `PointingProcessor` is generated on the central automatically.
 
+## Gestures
+
+The IC recognizes taps, swipes, two-finger scrolling and pinch zoom on its own.
+Give a gesture an action under `gestures` to enable it; gestures without an
+action stay off. The action runs on the central like a key press, so it can be
+a mouse button, a shortcut or a layer key.
+
+```toml
+[[input_device.iqs5xx]]
+name = "trackpad0"
+# ... i2c and rdy as above ...
+
+[input_device.iqs5xx.gestures]
+single_tap = "MouseBtn1"
+# Held while the finger rests, and the cursor still moves: drag and drop.
+press_and_hold = "MouseBtn1"
+two_finger_tap = "MouseBtn2"
+# Once per zoom step; Ctrl + = / Ctrl + - zoom most apps.
+zoom_in = "WM(Equal, LCtrl)"
+zoom_out = "WM(Minus, LCtrl)"
+# Two-finger scrolling.
+scroll = true
+# Trackpad movement per scroll step; larger scrolls slower. Default: 8.
+scroll_divisor = 8
+# Content follows the fingers.
+natural_scroll = true
+# One-finger swipes, by cursor direction. The cursor moves during a swipe too.
+# swipe_left = "..."
+# swipe_right = "..."
+# swipe_up = "..."
+# swipe_down = "..."
+```
+
+On a split keyboard use `[split.central.input_device.iqs5xx.gestures]` or
+`[split.peripheral.input_device.iqs5xx.gestures]`.
+
+| Gesture | When it fires |
+|---|---|
+| `single_tap` | One finger touches and lifts without moving |
+| `press_and_hold` | One finger stays still; the action is held until the finger lifts |
+| `two_finger_tap` | Two fingers tap together |
+| `scroll` | Two fingers move in parallel |
+| `zoom_in` / `zoom_out` | Two fingers move apart / together |
+| `swipe_*` | One finger moves quickly in one direction |
+
+Gestures press virtual keys (`KeyboardEventPos::Virtual`): their actions are in
+`BehaviorConfig::virtual_keys`, and scrolling reaches the `PointingProcessor` on
+the `H`/`V` axes, where `device_scroll` turns it into wheel and pan reports.
+They don't depend on the active layer, and Vial can't edit them.
+
 ## Rust configuration
 
 Construct the device directly. For a split keyboard, add the device to whichever
@@ -93,6 +143,15 @@ let rdy = Some(Input::new(p.PIN_15, Pull::None));
 //    pick any 0-255, just don't reuse it for another pointing device.
 const POINTING_DEV_ID: u8 = 0;
 let mut trackpad = Iqs5xx::new(POINTING_DEV_ID, i2c, rdy);
+// Optional: enable gestures. Each `Some(i)` presses `KeyboardEventPos::Virtual(i)`,
+// whose action is `behavior_config.virtual_keys[i]`, e.g.
+// `virtual_keys: &[k!(MouseBtn1), k!(MouseBtn2)]`.
+// let mut trackpad = trackpad.with_gestures(Iqs5xxGestures {
+//     single_tap: Some(0),
+//     two_finger_tap: Some(1),
+//     scroll: true,
+//     ..Default::default()
+// });
 
 // 4. Add a PointingProcessor on the central side to convert motion events
 //    into mouse reports. Axis tweaks (invert / swap) live here.

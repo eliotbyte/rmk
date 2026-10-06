@@ -203,7 +203,13 @@ impl KeyMapInner<'_> {
                 }
                 KeyAction::No
             }
-            KeyboardEventPos::Combo(_) | KeyboardEventPos::Macro | KeyboardEventPos::Virtual(_) => KeyAction::No,
+            KeyboardEventPos::Virtual(idx) => self
+                .behavior
+                .virtual_keys
+                .get(idx as usize)
+                .copied()
+                .unwrap_or(KeyAction::No),
+            KeyboardEventPos::Combo(_) | KeyboardEventPos::Macro => KeyAction::No,
         }
     }
 

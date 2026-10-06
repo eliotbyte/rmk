@@ -19,7 +19,7 @@ use crate::codegen::feature::{get_rmk_features, is_feature_enabled};
 use crate::codegen::import::expand_custom_imports;
 use crate::codegen::input_device::adc::expand_adc_device;
 use crate::codegen::input_device::encoder::expand_encoder_device;
-use crate::codegen::input_device::iqs5xx::{expand_iqs5xx_device, expand_iqs5xx_interrupts};
+use crate::codegen::input_device::iqs5xx::{Side, expand_iqs5xx_device, expand_iqs5xx_interrupts};
 use crate::codegen::input_device::pmw33xx::expand_pmw33xx_device;
 use crate::codegen::input_device::pmw3610::expand_pmw3610_device;
 use crate::codegen::keyboard_config::read_keyboard_toml_config;
@@ -827,18 +827,8 @@ pub(crate) fn expand_peripheral_input_device_config(
     }
 
     // generate IQS5xx configuration
-    let (iqs5xx_devices, _iqs5xx_processors) = match board {
-        BoardConfig::Split(split_config) => expand_iqs5xx_device(
-            split_config.peripheral[id]
-                .input_device
-                .clone()
-                .unwrap_or(InputDeviceConfig::default())
-                .iqs5xx
-                .unwrap_or(Vec::new()),
-            chip,
-        ),
-        _ => (vec![], vec![]),
-    };
+    let (iqs5xx_devices, _iqs5xx_processors) =
+        expand_iqs5xx_device(board, Side::Peripheral(id), chip);
 
     for initializer in iqs5xx_devices {
         initializations.extend(initializer.initializer);

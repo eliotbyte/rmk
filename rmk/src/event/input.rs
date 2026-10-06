@@ -155,7 +155,7 @@ pub enum AxisValType {
     Abs,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, MaxSize)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, MaxSize)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum Axis {

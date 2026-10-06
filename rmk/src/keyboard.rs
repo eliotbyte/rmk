@@ -2051,6 +2051,29 @@ mod test {
     }
 
     #[test]
+    fn virtual_key_runs_its_action_from_the_table() {
+        let main = async {
+            const VIRTUAL_KEYS: &[KeyAction] = &[KeyAction::No, k!(B)];
+            let mut keyboard = create_test_keyboard_with_config(BehaviorConfig {
+                virtual_keys: VIRTUAL_KEYS,
+                ..BehaviorConfig::default()
+            });
+            let pos = KeyboardEventPos::Virtual(1);
+
+            keyboard.process_inner(KeyboardEvent { pressed: true, pos }).await;
+            assert_eq!(keyboard.held_keycodes()[0], HidKeyCode::B);
+            keyboard.process_inner(KeyboardEvent { pressed: false, pos }).await;
+            assert_eq!(keyboard.held_keycodes()[0], HidKeyCode::No);
+
+            // An index past the table does nothing.
+            let pos = KeyboardEventPos::Virtual(5);
+            keyboard.process_inner(KeyboardEvent { pressed: true, pos }).await;
+            assert_eq!(keyboard.held_keycodes()[0], HidKeyCode::No);
+        };
+        block_on(main);
+    }
+
+    #[test]
     fn test_modifier_key() {
         let main = async {
             let mut keyboard = create_test_keyboard();

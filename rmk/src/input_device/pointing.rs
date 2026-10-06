@@ -507,6 +507,9 @@ pub struct PointingProcessorConfig {
     pub invert_y: bool,
     /// Swap X and Y axes (applied to all modes before mode-specific processing)
     pub swap_xy: bool,
+    /// Scrolling reported by the device itself on the H/V axes (e.g. a two-finger
+    /// trackpad gesture). It becomes wheel/pan in every mode, after the transforms above.
+    pub device_scroll: ScrollConfig,
 }
 
 impl Default for PointingProcessorConfig {
@@ -516,6 +519,7 @@ impl Default for PointingProcessorConfig {
             invert_x: false,
             invert_y: false,
             swap_xy: false,
+            device_scroll: ScrollConfig::default(),
         }
     }
 }
@@ -528,6 +532,8 @@ pub struct PointingProcessor<'a> {
     config: PointingProcessorConfig,
     /// Motion accumulator for scroll/sniper modes
     accumulator: MotionAccumulator,
+    /// Accumulator for the device's own H/V scrolling
+    device_scroll_accumulator: MotionAccumulator,
     /// current active mode
     current_mode: PointingMode,
 }
@@ -539,8 +545,42 @@ impl<'a> PointingProcessor<'a> {
             keymap,
             config,
             accumulator: MotionAccumulator::default(),
+            device_scroll_accumulator: MotionAccumulator::default(),
             current_mode: PointingMode::default(),
         }
+    }
+
+    /// Turn the device's H/V scrolling into a wheel/pan report. H and V follow the
+    /// sensor's X and Y, so they get the same invert/swap as the cursor.
+    async fn send_device_scroll(&mut self, mut h: i16, mut v: i16) {
+        if self.config.invert_x {
+            h = -h;
+        }
+        if self.config.invert_y {
+            v = -v;
+        }
+        if self.config.swap_xy {
+            (h, v) = (v, h);
+        }
+        let scroll = self.config.device_scroll;
+        let (sh, sv) = self.device_scroll_accumulator.accumulate(
+            h,
+            v,
+            (scroll.multiplier_x, scroll.divisor_x),
+            (scroll.multiplier_y, scroll.divisor_y),
+        );
+        if sh == 0 && sv == 0 {
+            return;
+        }
+        send_hid_report(Report::MouseReport(MouseReport {
+            buttons: self.keymap.mouse_buttons(),
+            x: 0,
+            y: 0,
+            // Same convention as scroll mode: sensor +V scrolls up unless inverted.
+            wheel: if scroll.invert_y { sv } else { -sv },
+            pan: if scroll.invert_x { -sh } else { sh },
+        }))
+        .await;
     }
 
     /// Set the pointing mode
@@ -563,12 +603,23 @@ impl<'a> PointingProcessor<'a> {
 
         let mut x = 0i16;
         let mut y = 0i16;
+        let mut h = 0i16;
+        let mut v = 0i16;
 
         for axis_event in event.axes.iter() {
             match axis_event.axis {
                 Axis::X => x = axis_event.value,
                 Axis::Y => y = axis_event.value,
+                Axis::H => h = axis_event.value,
+                Axis::V => v = axis_event.value,
                 _ => {}
+            }
+        }
+
+        if h != 0 || v != 0 {
+            self.send_device_scroll(h, v).await;
+            if x == 0 && y == 0 {
+                return;
             }
         }
 

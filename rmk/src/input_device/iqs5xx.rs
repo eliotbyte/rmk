@@ -69,11 +69,13 @@
 //!   scroll, zoom/pinch
 //! * raw per-channel count/delta data (§8.10.6)
 //!
-//! This driver currently requests only the 10-byte motion block at 0x000C
-//! (previous cycle time, gesture events, system info, number of fingers,
-//! relative XY) and publishes relative XY as cursor movement. Gestures are
-//! left disabled on the IC; absolute finger data and raw channel data are
-//! not read.
+//! This driver requests only the 10-byte motion block at 0x000C (previous
+//! cycle time, gesture events, system info, number of fingers, relative XY).
+//! Relative XY is published as cursor movement. The IC's own gestures (§6) are
+//! enabled per [`Iqs5xxGestures`]: taps, press-and-hold, swipes and zoom press
+//! virtual keys (`KeyboardEventPos::Virtual`), whose actions live in
+//! `BehaviorConfig::virtual_keys`; two-finger scroll is published on the H/V
+//! axes. Absolute finger data and raw channel data are not read.
 //!
 //! # Configuration
 //!
@@ -95,7 +97,7 @@ use embedded_hal_async::digital::Wait;
 use embedded_hal_async::i2c::I2c;
 use rmk_macro::input_device;
 
-use crate::event::{AxisEvent, PointingEvent};
+use crate::event::{Axis, AxisEvent, AxisValType, KeyboardEvent, KeyboardEventPos, PointingEvent, publish_event_async};
 use crate::fmt::Debug;
 
 const I2C_ADDR: u8 = 0x74; // default I2C bus address according to §8.2.
@@ -117,6 +119,131 @@ where
     window_detection: WindowDetection<RDY>,
 
     initialized: bool,
+
+    gestures: Iqs5xxGestures,
+
+    /// Whether the press-and-hold virtual key is down.
+    holding: bool,
+}
+
+/// The IQS5xx's built-in gestures (§6) to enable, each with the index of the
+/// virtual key (`KeyboardEventPos::Virtual`) it presses. `None` leaves the
+/// gesture disabled on the IC.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Iqs5xxGestures {
+    /// One-finger tap: the key is tapped when the finger lifts (§6.1).
+    pub single_tap: Option<u8>,
+    /// One finger held still: the key stays pressed until the finger lifts, and the
+    /// cursor moves meanwhile, which makes a drag (§6.2).
+    pub press_and_hold: Option<u8>,
+    /// One-finger swipes along the sensor axes (§6.3). The cursor moves as well.
+    pub swipe_x_neg: Option<u8>,
+    pub swipe_x_pos: Option<u8>,
+    pub swipe_y_neg: Option<u8>,
+    pub swipe_y_pos: Option<u8>,
+    /// Two-finger tap (§6.4).
+    pub two_finger_tap: Option<u8>,
+    /// Two-finger scroll, published on the H/V axes (§6.5).
+    pub scroll: bool,
+    /// Pinch apart / together: tapped once per zoom step (§6.6).
+    pub zoom_in: Option<u8>,
+    pub zoom_out: Option<u8>,
+}
+
+impl Iqs5xxGestures {
+    /// Single Finger Gestures register value, §8.10.21.
+    fn single_finger_enable(&self) -> u8 {
+        [
+            self.single_tap,
+            self.press_and_hold,
+            self.swipe_x_neg,
+            self.swipe_x_pos,
+            self.swipe_y_pos,
+            self.swipe_y_neg,
+        ]
+        .iter()
+        .enumerate()
+        .fold(0, |bits, (bit, key)| if key.is_some() { bits | 1 << bit } else { bits })
+    }
+
+    /// Multi-finger Gestures register value, §8.10.22.
+    fn multi_finger_enable(&self) -> u8 {
+        u8::from(self.two_finger_tap.is_some())
+            | u8::from(self.scroll) << 1
+            | u8::from(self.zoom_in.is_some() || self.zoom_out.is_some()) << 2
+    }
+}
+
+/// The part of one cycle's motion block the gestures depend on.
+struct Motion {
+    gesture_events_0: u8,
+    gesture_events_1: u8,
+    dx: i16,
+    dy: i16,
+}
+
+/// What one cycle turns into: virtual key presses `(index, pressed)` in order, and
+/// the axes to publish, X/Y for the cursor or H/V for scrolling.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CycleOutput {
+    keys: heapless::Vec<(u8, bool), 4>,
+    axes: Option<[(Axis, i16); 2]>,
+}
+
+/// Decode a cycle's gesture bits (§8.10.1-§8.10.2) against the enabled gestures.
+/// `holding` is whether the press-and-hold key is down; it is updated here.
+fn decode_cycle(gestures: &Iqs5xxGestures, motion: &Motion, holding: &mut bool) -> CycleOutput {
+    let mut out = CycleOutput::default();
+    let tap = |key: Option<u8>, out: &mut CycleOutput| {
+        if let Some(key) = key {
+            let _ = out.keys.push((key, true));
+            let _ = out.keys.push((key, false));
+        }
+    };
+    let g0 = motion.gesture_events_0;
+    let g1 = motion.gesture_events_1;
+
+    let hold = g0 & 0b10 != 0;
+    if let Some(key) = gestures.press_and_hold
+        && hold != *holding
+    {
+        *holding = hold;
+        let _ = out.keys.push((key, hold));
+    }
+    if g0 & 0b1 != 0 {
+        tap(gestures.single_tap, &mut out);
+    }
+    for (bit, key) in [
+        (2, gestures.swipe_x_neg),
+        (3, gestures.swipe_x_pos),
+        (4, gestures.swipe_y_pos),
+        (5, gestures.swipe_y_neg),
+    ] {
+        if g0 & 1 << bit != 0 {
+            tap(key, &mut out);
+        }
+    }
+    if g1 & 0b1 != 0 {
+        tap(gestures.two_finger_tap, &mut out);
+    }
+
+    // During scroll and zoom the relative registers carry the gesture, not the cursor.
+    if g1 & 0b100 != 0 {
+        // The zoom step is in relative X, positive when the fingers move apart (§6.6).
+        if motion.dx > 0 {
+            tap(gestures.zoom_in, &mut out);
+        } else if motion.dx < 0 {
+            tap(gestures.zoom_out, &mut out);
+        }
+    } else if motion.dx != 0 || motion.dy != 0 {
+        let (h, v) = if g1 & 0b10 != 0 {
+            (Axis::H, Axis::V)
+        } else {
+            (Axis::X, Axis::Y)
+        };
+        out.axes = Some([(h, motion.dx), (v, motion.dy)]);
+    }
+    out
 }
 
 /// Manner of detecting a "communication window" between cycles.
@@ -192,7 +319,15 @@ where
             },
             initialized: false,
             pointing_device_id: rmk_id,
+            gestures: Iqs5xxGestures::default(),
+            holding: false,
         }
+    }
+
+    /// Enable the IC's gestures, each pressing its virtual key.
+    pub fn with_gestures(mut self, gestures: Iqs5xxGestures) -> Self {
+        self.gestures = gestures;
+        self
     }
 
     /// Initialize the device.
@@ -265,8 +400,8 @@ where
         #[rustfmt::skip]
         let gestures = [
             0x06, 0xB7, // Single-/Multi-finger Gestures at 0x06B7/0x06B8; §8.10.21-§8.10.22
-            0,          // single-finger: all disabled
-            0,          // multi-finger:  all disabled
+            self.gestures.single_finger_enable(),
+            self.gestures.multi_finger_enable(),
         ];
 
         // X/Y Resolution at 0x066E..0x0671 (2 bytes each); §5.4.
@@ -313,7 +448,7 @@ where
         Ok(())
     }
 
-    async fn read_motion(&mut self) -> Result<PointingEvent, Error<I::Error>> {
+    async fn read_motion(&mut self) -> Result<Motion, Error<I::Error>> {
         // Motion block at 0x000C..0x0015 per table 8.1: previous cycle time
         // (§4.1.1), gesture events 0/1 (§8.10.1-§8.10.2), system info 0/1
         // (§8.10.3-§8.10.4), number of fingers (§5.2.1), relative XY (§5.2.2).
@@ -384,32 +519,34 @@ where
             dx,
             dy,
         );
-        Ok(PointingEvent {
-            device_id: self.pointing_device_id,
-            axes: [
-                AxisEvent {
-                    typ: crate::event::AxisValType::Rel,
-                    axis: crate::event::Axis::X,
-                    value: dx,
-                },
-                AxisEvent {
-                    typ: crate::event::AxisValType::Rel,
-                    axis: crate::event::Axis::Y,
-                    value: dy,
-                },
-                AxisEvent {
-                    typ: crate::event::AxisValType::Rel,
-                    axis: crate::event::Axis::Z,
-                    value: 0,
-                },
-            ],
+        Ok(Motion {
+            gesture_events_0,
+            gesture_events_1,
+            dx,
+            dy,
         })
+    }
+
+    async fn publish_virtual_key(key: u8, pressed: bool) {
+        publish_event_async(KeyboardEvent {
+            pressed,
+            pos: KeyboardEventPos::Virtual(key),
+        })
+        .await;
     }
 
     async fn read_pointing_event(&mut self) -> PointingEvent {
         loop {
             // Check initialization status on each iteration because the device
             // can reset and require re-initialization.
+            // A reset mid-drag must not leave the press-and-hold key down.
+            if !self.initialized
+                && self.holding
+                && let Some(key) = self.gestures.press_and_hold
+            {
+                self.holding = false;
+                Self::publish_virtual_key(key, false).await;
+            }
             if !self.initialized
                 && let Err(e) = self.init().await
             {
@@ -421,9 +558,21 @@ where
                 continue;
             }
             match self.read_motion().await {
-                Ok(e) => {
-                    if e.axes.iter().any(|axis| axis.value != 0) {
-                        return e;
+                Ok(motion) => {
+                    let out = decode_cycle(&self.gestures, &motion, &mut self.holding);
+                    for (key, pressed) in out.keys {
+                        Self::publish_virtual_key(key, pressed).await;
+                    }
+                    if let Some([(axis_a, a), (axis_b, b)]) = out.axes {
+                        let rel = |axis, value| AxisEvent {
+                            typ: AxisValType::Rel,
+                            axis,
+                            value,
+                        };
+                        return PointingEvent {
+                            device_id: self.pointing_device_id,
+                            axes: [rel(axis_a, a), rel(axis_b, b), rel(Axis::Z, 0)],
+                        };
                     }
                 }
                 Err(e) => {
@@ -432,5 +581,120 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: Iqs5xxGestures = Iqs5xxGestures {
+        single_tap: Some(0),
+        press_and_hold: Some(1),
+        swipe_x_neg: Some(2),
+        swipe_x_pos: Some(3),
+        swipe_y_neg: Some(4),
+        swipe_y_pos: Some(5),
+        two_finger_tap: Some(6),
+        scroll: true,
+        zoom_in: Some(7),
+        zoom_out: Some(8),
+    };
+
+    fn motion(gesture_events_0: u8, gesture_events_1: u8, dx: i16, dy: i16) -> Motion {
+        Motion {
+            gesture_events_0,
+            gesture_events_1,
+            dx,
+            dy,
+        }
+    }
+
+    fn keys(out: &CycleOutput) -> &[(u8, bool)] {
+        &out.keys
+    }
+
+    #[test]
+    fn enable_registers_follow_the_datasheet_bit_order() {
+        assert_eq!(ALL.single_finger_enable(), 0b11_1111);
+        assert_eq!(ALL.multi_finger_enable(), 0b111);
+        let swipe_y_neg_only = Iqs5xxGestures {
+            swipe_y_neg: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(swipe_y_neg_only.single_finger_enable(), 0b10_0000);
+        let zoom_out_only = Iqs5xxGestures {
+            zoom_out: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(zoom_out_only.multi_finger_enable(), 0b100);
+        assert_eq!(Iqs5xxGestures::default().single_finger_enable(), 0);
+        assert_eq!(Iqs5xxGestures::default().multi_finger_enable(), 0);
+    }
+
+    #[test]
+    fn plain_motion_moves_the_cursor() {
+        let out = decode_cycle(&ALL, &motion(0, 0, 3, -4), &mut false);
+        assert!(keys(&out).is_empty());
+        assert_eq!(out.axes, Some([(Axis::X, 3), (Axis::Y, -4)]));
+    }
+
+    #[test]
+    fn taps_press_and_release_their_keys() {
+        let out = decode_cycle(&ALL, &motion(0b1, 0, 0, 0), &mut false);
+        assert_eq!(keys(&out), &[(0, true), (0, false)]);
+        assert_eq!(out.axes, None);
+        let out = decode_cycle(&ALL, &motion(0, 0b1, 0, 0), &mut false);
+        assert_eq!(keys(&out), &[(6, true), (6, false)]);
+    }
+
+    #[test]
+    fn swipes_map_to_their_bits() {
+        for (bit, key) in [(2, 2), (3, 3), (4, 5), (5, 4)] {
+            let out = decode_cycle(&ALL, &motion(1 << bit, 0, 0, 0), &mut false);
+            assert_eq!(keys(&out), &[(key, true), (key, false)], "bit {bit}");
+        }
+    }
+
+    #[test]
+    fn press_and_hold_stays_down_and_drags() {
+        let mut holding = false;
+        let out = decode_cycle(&ALL, &motion(0b10, 0, 0, 0), &mut holding);
+        assert_eq!(keys(&out), &[(1, true)]);
+        assert!(holding);
+        // Still held: no key change, the cursor moves.
+        let out = decode_cycle(&ALL, &motion(0b10, 0, 5, 1), &mut holding);
+        assert!(keys(&out).is_empty());
+        assert_eq!(out.axes, Some([(Axis::X, 5), (Axis::Y, 1)]));
+        let out = decode_cycle(&ALL, &motion(0, 0, 0, 0), &mut holding);
+        assert_eq!(keys(&out), &[(1, false)]);
+        assert!(!holding);
+    }
+
+    #[test]
+    fn two_finger_scroll_goes_to_the_scroll_axes() {
+        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut false);
+        assert!(keys(&out).is_empty());
+        assert_eq!(out.axes, Some([(Axis::H, 0), (Axis::V, -7)]));
+    }
+
+    #[test]
+    fn zoom_taps_in_or_out_by_sign_and_never_moves_the_cursor() {
+        let out = decode_cycle(&ALL, &motion(0, 0b100, 12, 0), &mut false);
+        assert_eq!(keys(&out), &[(7, true), (7, false)]);
+        assert_eq!(out.axes, None);
+        let out = decode_cycle(&ALL, &motion(0, 0b100, -12, 0), &mut false);
+        assert_eq!(keys(&out), &[(8, true), (8, false)]);
+        assert_eq!(out.axes, None);
+    }
+
+    #[test]
+    fn gestures_without_a_key_are_ignored() {
+        let none = Iqs5xxGestures::default();
+        let mut holding = false;
+        let out = decode_cycle(&none, &motion(0b11_1111, 0b001, 2, 2), &mut holding);
+        assert!(keys(&out).is_empty());
+        assert!(!holding);
+        assert_eq!(out.axes, Some([(Axis::X, 2), (Axis::Y, 2)]));
     }
 }

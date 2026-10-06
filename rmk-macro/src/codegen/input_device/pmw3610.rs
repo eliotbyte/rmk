@@ -168,6 +168,7 @@ pub(crate) fn expand_pmw3610_device(
                 invert_y: #proc_invert_y,
                 swap_xy: #proc_swap_xy,
                 ..Default::default()
+                ..::core::default::Default::default(),
             };
 
             let mut #processor_ident = ::rmk::input_device::pointing::PointingProcessor::new(&keymap, #processor_ident_config);

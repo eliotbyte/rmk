@@ -1,5 +1,6 @@
 use embassy_time::Duration;
 use heapless::Vec;
+use rmk_types::action::KeyAction;
 use rmk_types::fork::Fork;
 use rmk_types::keyboard_macros::MacroOp;
 use rmk_types::keycode::KeyCode;
@@ -27,6 +28,9 @@ pub struct BehaviorConfig {
     /// flash replaces its default. Check a hand-written table with
     /// `const _: () = assert!(validate_default_macros(MACROS));`.
     pub keyboard_macros: &'static [&'static [MacroOp]],
+    /// Actions of software keys, `KeyboardEventPos::Virtual(i)` triggers the `i`th.
+    /// Input devices such as trackpad gestures press these; they don't depend on the layer.
+    pub virtual_keys: &'static [KeyAction],
     pub mouse_key: MouseKeyConfig,
     pub auto_mouse_layer: Vec<AutoMouseLayerConfig, AUTO_MOUSE_LAYER_MAX_NUM>,
 }

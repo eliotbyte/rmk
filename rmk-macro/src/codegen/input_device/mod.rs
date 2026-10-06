@@ -1,6 +1,6 @@
 use adc::expand_adc_device;
 use encoder::expand_encoder_device;
-use iqs5xx::expand_iqs5xx_device;
+use iqs5xx::{Side, expand_iqs5xx_device};
 use pmw33xx::expand_pmw33xx_device;
 use pmw3610::expand_pmw3610_device;
 use proc_macro2::{Ident, TokenStream};
@@ -244,21 +244,8 @@ pub(crate) fn expand_input_device_config(
     }
 
     // generate IQS5xx configuration
-    let (iqs5xx_device_initializers, iqs5xx_processor_initializers) = match board {
-        BoardConfig::UniBody(UniBodyConfig { input_device, .. }) => {
-            expand_iqs5xx_device(input_device.clone().iqs5xx.unwrap_or(Vec::new()), chip)
-        }
-        BoardConfig::Split(split_config) => expand_iqs5xx_device(
-            split_config
-                .central
-                .input_device
-                .clone()
-                .unwrap_or(InputDeviceConfig::default())
-                .iqs5xx
-                .unwrap_or(Vec::new()),
-            chip,
-        ),
-    };
+    let (iqs5xx_device_initializers, iqs5xx_processor_initializers) =
+        expand_iqs5xx_device(board, Side::Central, chip);
 
     for initializer in iqs5xx_device_initializers {
         initialization.extend(initializer.initializer);
@@ -275,17 +262,10 @@ pub(crate) fn expand_input_device_config(
     // For split keyboards, also generate processors for IQS5xx devices on peripherals
     // The devices run on peripherals, but processors need to run on central to handle the events
     if let BoardConfig::Split(split_config) = board {
-        for peripheral in &split_config.peripheral {
-            let peripheral_iqs5xx_config = peripheral
-                .input_device
-                .clone()
-                .unwrap_or(InputDeviceConfig::default())
-                .iqs5xx
-                .unwrap_or(Vec::new());
-
+        for id in 0..split_config.peripheral.len() {
             // Only generate processors (not devices) for peripheral IQS5xx
             let (_, peripheral_iqs5xx_processors) =
-                expand_iqs5xx_device(peripheral_iqs5xx_config, chip);
+                expand_iqs5xx_device(board, Side::Peripheral(id), chip);
 
             for initializer in peripheral_iqs5xx_processors {
                 initialization.extend(initializer.initializer);

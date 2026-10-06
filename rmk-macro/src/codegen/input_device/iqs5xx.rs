@@ -1,15 +1,188 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use rmk_config::resolved::hardware::{ChipModel, ChipSeries, Iqs5xxConfig};
+use rmk_config::resolved::hardware::{
+    BoardConfig, ChipModel, ChipSeries, InputDeviceConfig, Iqs5xxConfig,
+};
 
 use super::Initializer;
 
-/// Expand IQS5xx device configuration.
+/// Where a trackpad is wired: the central (or a unibody board), or peripheral `n`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Side {
+    Central,
+    Peripheral(usize),
+}
+
+/// The trackpads wired to `side`.
+pub(crate) fn trackpads(board: &BoardConfig, side: Side) -> Vec<Iqs5xxConfig> {
+    let input_device = match (board, side) {
+        (BoardConfig::UniBody(unibody), Side::Central) => Some(unibody.input_device.clone()),
+        (BoardConfig::Split(split), Side::Central) => split.central.input_device.clone(),
+        (BoardConfig::Split(split), Side::Peripheral(id)) => split
+            .peripheral
+            .get(id)
+            .and_then(|p| p.input_device.clone()),
+        (BoardConfig::UniBody(_), Side::Peripheral(_)) => None,
+    };
+    input_device
+        .unwrap_or(InputDeviceConfig::default())
+        .iqs5xx
+        .unwrap_or_default()
+}
+
+/// The IC's gestures, in the order their virtual keys are numbered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gesture {
+    SingleTap,
+    PressAndHold,
+    SwipeXNeg,
+    SwipeXPos,
+    SwipeYNeg,
+    SwipeYPos,
+    TwoFingerTap,
+    ZoomIn,
+    ZoomOut,
+}
+
+const GESTURES: [Gesture; 9] = [
+    Gesture::SingleTap,
+    Gesture::PressAndHold,
+    Gesture::SwipeXNeg,
+    Gesture::SwipeXPos,
+    Gesture::SwipeYNeg,
+    Gesture::SwipeYPos,
+    Gesture::TwoFingerTap,
+    Gesture::ZoomIn,
+    Gesture::ZoomOut,
+];
+
+/// The action configured for `gesture`. Swipes are configured by cursor direction,
+/// so a sensor-axis swipe goes through the same invert/swap as the cursor.
+fn gesture_action(config: &Iqs5xxConfig, gesture: Gesture) -> Option<&String> {
+    let g = &config.gestures;
+    let sensor = match gesture {
+        Gesture::SingleTap => return g.single_tap.as_ref(),
+        Gesture::PressAndHold => return g.press_and_hold.as_ref(),
+        Gesture::TwoFingerTap => return g.two_finger_tap.as_ref(),
+        Gesture::ZoomIn => return g.zoom_in.as_ref(),
+        Gesture::ZoomOut => return g.zoom_out.as_ref(),
+        Gesture::SwipeXNeg => (-1, 0),
+        Gesture::SwipeXPos => (1, 0),
+        Gesture::SwipeYNeg => (0, -1),
+        Gesture::SwipeYPos => (0, 1),
+    };
+    let (mut x, mut y) = sensor;
+    if config.proc_invert_x {
+        x = -x;
+    }
+    if config.proc_invert_y {
+        y = -y;
+    }
+    if config.proc_swap_xy {
+        (x, y) = (y, x);
+    }
+    // Cursor +Y points down.
+    match (x, y) {
+        (1, _) => g.swipe_right.as_ref(),
+        (-1, _) => g.swipe_left.as_ref(),
+        (_, 1) => g.swipe_down.as_ref(),
+        _ => g.swipe_up.as_ref(),
+    }
+}
+
+/// One gesture with an action: on which trackpad, and the action string.
+pub(crate) struct GestureKey {
+    side: Side,
+    device: usize,
+    gesture: Gesture,
+    pub(crate) action: String,
+}
+
+/// Every configured gesture of every trackpad: the central's first, then each
+/// peripheral's in order. A gesture's position is its `KeyboardEventPos::Virtual`
+/// index, so the half that reads the trackpad and the central that runs the
+/// actions derive the same numbering from keyboard.toml.
+pub(crate) fn gesture_keys(board: &BoardConfig) -> Vec<GestureKey> {
+    let peripherals = match board {
+        BoardConfig::Split(split) => split.peripheral.len(),
+        BoardConfig::UniBody(_) => 0,
+    };
+    let sides = core::iter::once(Side::Central).chain((0..peripherals).map(Side::Peripheral));
+    let mut keys = Vec::new();
+    for side in sides {
+        for (device, config) in trackpads(board, side).iter().enumerate() {
+            for gesture in GESTURES {
+                if let Some(action) = gesture_action(config, gesture) {
+                    keys.push(GestureKey {
+                        side,
+                        device,
+                        gesture,
+                        action: action.clone(),
+                    });
+                }
+            }
+        }
+    }
+    if keys.len() > usize::from(u8::MAX) + 1 {
+        panic!("\n\u{274c} keyboard.toml: at most 256 trackpad gestures can have an action");
+    }
+    keys
+}
+
+/// The `Iqs5xxGestures` of trackpad `device` on `side`.
+fn expand_gestures(
+    board: &BoardConfig,
+    side: Side,
+    device: usize,
+    config: &Iqs5xxConfig,
+) -> TokenStream {
+    let keys = gesture_keys(board);
+    let key = |gesture| match keys
+        .iter()
+        .position(|k| k.side == side && k.device == device && k.gesture == gesture)
+    {
+        Some(idx) => {
+            let idx = idx as u8;
+            quote! { Some(#idx) }
+        }
+        None => quote! { None },
+    };
+    let [
+        single_tap,
+        press_and_hold,
+        swipe_x_neg,
+        swipe_x_pos,
+        swipe_y_neg,
+        swipe_y_pos,
+        two_finger_tap,
+        zoom_in,
+        zoom_out,
+    ] = GESTURES.map(key);
+    let scroll = config.gestures.scroll;
+    quote! {
+        ::rmk::input_device::iqs5xx::Iqs5xxGestures {
+            single_tap: #single_tap,
+            press_and_hold: #press_and_hold,
+            swipe_x_neg: #swipe_x_neg,
+            swipe_x_pos: #swipe_x_pos,
+            swipe_y_neg: #swipe_y_neg,
+            swipe_y_pos: #swipe_y_pos,
+            two_finger_tap: #two_finger_tap,
+            scroll: #scroll,
+            zoom_in: #zoom_in,
+            zoom_out: #zoom_out,
+        }
+    }
+}
+
+/// Expand IQS5xx device configuration for the trackpads wired to `side`.
 /// Returns (device initializers, processor initializers).
 pub(crate) fn expand_iqs5xx_device(
-    iqs5xx_config: Vec<Iqs5xxConfig>,
+    board: &BoardConfig,
+    side: Side,
     chip: &ChipModel,
 ) -> (Vec<Initializer>, Vec<Initializer>) {
+    let iqs5xx_config = trackpads(board, side);
     if iqs5xx_config.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -47,6 +220,9 @@ pub(crate) fn expand_iqs5xx_device(
         let proc_invert_x = sensor.proc_invert_x;
         let proc_invert_y = sensor.proc_invert_y;
         let proc_swap_xy = sensor.proc_swap_xy;
+        let gestures = expand_gestures(board, side, idx, sensor);
+        let scroll_divisor = sensor.gestures.scroll_divisor.unwrap_or(8);
+        let natural_scroll = sensor.gestures.natural_scroll;
 
         let rdy_init = match (&sensor.rdy, &chip.series) {
             (Some(rdy_pin), ChipSeries::Nrf52) => {
@@ -93,7 +269,8 @@ pub(crate) fn expand_iqs5xx_device(
                     #sensor_id,
                     #i2c_ident,
                     #rdy_ident,
-                );
+                )
+                .with_gestures(#gestures);
             },
             ChipSeries::Rp2040 => quote! {
                 #rdy_init
@@ -108,7 +285,8 @@ pub(crate) fn expand_iqs5xx_device(
                     #sensor_id,
                     #i2c_ident,
                     #rdy_ident,
-                );
+                )
+                .with_gestures(#gestures);
             },
             _ => unreachable!(),
         };
@@ -124,6 +302,14 @@ pub(crate) fn expand_iqs5xx_device(
                 invert_x: #proc_invert_x,
                 invert_y: #proc_invert_y,
                 swap_xy: #proc_swap_xy,
+                device_scroll: ::rmk::input_device::pointing::ScrollConfig {
+                    multiplier_x: 1,
+                    divisor_x: #scroll_divisor,
+                    multiplier_y: 1,
+                    divisor_y: #scroll_divisor,
+                    invert_x: #natural_scroll,
+                    invert_y: #natural_scroll,
+                },
             };
             let mut #processor_ident = ::rmk::input_device::pointing::PointingProcessor::new(
                 &keymap,
@@ -165,4 +351,21 @@ pub(crate) fn expand_iqs5xx_interrupts(
         }
     });
     quote! { #(#entries)* }
+}
+
+/// `behavior_config.virtual_keys`: the action of every trackpad gesture, by index.
+pub(crate) fn expand_virtual_keys(board: &BoardConfig) -> TokenStream {
+    let keys = gesture_keys(board);
+    if keys.is_empty() {
+        return quote! {};
+    }
+    let actions = keys
+        .into_iter()
+        .map(|key| super::super::action_parser::parse_key(key.action, &None));
+    quote! {
+        behavior_config.virtual_keys = {
+            const VIRTUAL_KEYS: &[::rmk::types::action::KeyAction] = &[#(#actions),*];
+            VIRTUAL_KEYS
+        };
+    }
 }

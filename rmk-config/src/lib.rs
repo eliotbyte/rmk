@@ -1386,6 +1386,41 @@ pub struct Iqs5xxConfig {
     /// Swap X and Y in the PointingProcessor.
     #[serde(default)]
     pub proc_swap_xy: bool,
+    /// The IC's built-in gestures and what they trigger. Off unless configured.
+    #[serde(default)]
+    pub gestures: Iqs5xxGesturesConfig,
+}
+
+/// IQS5xx gestures (`[input_device.iqs5xx.gestures]`). Each one set to an action is
+/// enabled on the IC; the action runs on the central like a key press, so a mouse
+/// button, a shortcut such as `WM(Equal, LCtrl)` or a layer all work.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Iqs5xxGesturesConfig {
+    /// One-finger tap, e.g. `"MouseBtn1"`.
+    pub single_tap: Option<String>,
+    /// One finger held still: the action stays pressed until the finger lifts, and
+    /// the cursor moves meanwhile. `"MouseBtn1"` gives drag-and-drop.
+    pub press_and_hold: Option<String>,
+    /// Two-finger tap, e.g. `"MouseBtn2"`.
+    pub two_finger_tap: Option<String>,
+    /// One-finger swipes. Directions are the cursor's, after `proc_invert_*` and
+    /// `proc_swap_xy`. The cursor moves during a swipe as well.
+    pub swipe_left: Option<String>,
+    pub swipe_right: Option<String>,
+    pub swipe_up: Option<String>,
+    pub swipe_down: Option<String>,
+    /// Two fingers moving apart / together, once per zoom step, e.g. `"WM(Equal, LCtrl)"`.
+    pub zoom_in: Option<String>,
+    pub zoom_out: Option<String>,
+    /// Two-finger scrolling.
+    #[serde(default)]
+    pub scroll: bool,
+    /// Trackpad movement per scroll step; larger scrolls slower. Defaults to 8.
+    pub scroll_divisor: Option<u8>,
+    /// Content follows the fingers, as on a phone.
+    #[serde(default)]
+    pub natural_scroll: bool,
 }
 
 /// I²C bus configuration for the IQS5xx. Distinct from the generic `I2cConfig`
