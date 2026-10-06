@@ -71,14 +71,15 @@
 //!
 //! This driver reads the motion block at 0x000C (previous cycle time, gesture
 //! events, system info, number of fingers, relative XY) and the absolute
-//! position of the first two fingers. Relative XY is published as cursor
+//! position of the first three fingers. Relative XY is published as cursor
 //! movement. The IC's one-finger gestures and two-finger tap (§6) are enabled
 //! per [`Iqs5xxGestures`] and press virtual keys (`KeyboardEventPos::Virtual`),
 //! whose actions live in `BehaviorConfig::virtual_keys`. Two-finger scroll and
 //! zoom are recognized here from the finger positions instead of by the IC,
 //! whose zoom only looks at the distance between the fingers: scrolling is
-//! published on the H/V axes, zoom steps press virtual keys. Raw channel data
-//! is not read.
+//! published on the H/V axes, zoom steps press virtual keys. Three-finger taps
+//! and swipes, which the IC doesn't have, are recognized here too. Raw channel
+//! data is not read.
 //!
 //! # Configuration
 //!
@@ -137,6 +138,28 @@ struct GestureState {
     /// Whether the press-and-hold virtual key is down.
     holding: bool,
     two_finger: TwoFingerState,
+    touch: Touch,
+}
+
+/// One touch: from the first finger landing until no finger is left.
+#[derive(Debug, Default)]
+struct Touch {
+    /// When the first finger landed; `None` while no finger is down.
+    started_ms: Option<u64>,
+    /// The most fingers down at once so far.
+    max_fingers: u8,
+    three_finger: ThreeFingerState,
+}
+
+/// Where the three-finger part of a touch stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ThreeFingerState {
+    #[default]
+    Idle,
+    /// Three fingers down since `start`; `moved` once they went further than a tap allows.
+    Tracking { start: [Point; 3], moved: bool },
+    /// A three-finger swipe fired; nothing more until the fingers lift.
+    Swiped,
 }
 
 /// A finger position, in pixels.
@@ -199,9 +222,15 @@ pub struct TwoFingerConfig {
     /// A two-finger swipe lifts within this many milliseconds of touching; a longer
     /// move scrolls.
     pub swipe_ms: u16,
-    /// A two-finger swipe keeps within this angle of its axis; it's `cos(angle)` in
-    /// permille (30° is 866).
+    /// A two- or three-finger swipe keeps within this angle of its axis; it's
+    /// `cos(angle)` in permille (30° is 866).
     pub swipe_cos_permille: u16,
+    /// How far three fingers move together for a three-finger swipe, in percent of the
+    /// trackpad's size in the swipe's direction.
+    pub three_swipe_percent: u8,
+    /// A three-finger tap lifts every finger within this many milliseconds of the
+    /// first touching.
+    pub three_tap_ms: u16,
 }
 
 impl Default for TwoFingerConfig {
@@ -213,6 +242,8 @@ impl Default for TwoFingerConfig {
             swipe_percent: 10,
             swipe_ms: 250,
             swipe_cos_permille: 866,
+            three_swipe_percent: 15,
+            three_tap_ms: 300,
         }
     }
 }
@@ -228,12 +259,15 @@ struct TwoFingerPx {
     swipe: [u32; 2],
     swipe_ms: u64,
     swipe_cos_permille: u32,
+    three_swipe: [u32; 2],
+    three_tap_ms: u64,
 }
 
 impl TwoFingerPx {
     fn new(config: &TwoFingerConfig, x_resolution: u16, y_resolution: u16) -> Self {
         let span = x_resolution.max(y_resolution);
         let swipe = |resolution| u32::from(percent_of(resolution, config.swipe_percent)).max(1);
+        let three_swipe = |resolution| u32::from(percent_of(resolution, config.three_swipe_percent)).max(1);
         Self {
             decide: u32::from(percent_of(span, config.decide_percent)),
             zoom_step: u32::from(percent_of(span, config.zoom_step_percent)).max(1),
@@ -241,12 +275,19 @@ impl TwoFingerPx {
             swipe: [swipe(x_resolution), swipe(y_resolution)],
             swipe_ms: u64::from(config.swipe_ms),
             swipe_cos_permille: u32::from(config.swipe_cos_permille.min(1000)),
+            three_swipe: [three_swipe(x_resolution), three_swipe(y_resolution)],
+            three_tap_ms: u64::from(config.three_tap_ms),
         }
     }
 
     /// The swipe distance along `dir`, a unit vector on one axis.
     fn swipe_along(&self, dir: Point) -> u32 {
         self.swipe[usize::from(dir.0 == 0)]
+    }
+
+    /// The three-finger swipe distance along `dir`.
+    fn three_swipe_along(&self, dir: Point) -> u32 {
+        self.three_swipe[usize::from(dir.0 == 0)]
     }
 }
 
@@ -280,7 +321,15 @@ pub struct Iqs5xxGestures {
     pub two_finger_swipe_x_pos: Option<u8>,
     pub two_finger_swipe_y_neg: Option<u8>,
     pub two_finger_swipe_y_pos: Option<u8>,
-    /// How two-finger gestures are recognized.
+    /// Three fingers tapping together. The IC has no three-finger gestures; the driver
+    /// recognizes them from the finger positions.
+    pub three_finger_tap: Option<u8>,
+    /// Three fingers moving together far along a sensor axis: tapped once per touch.
+    pub three_finger_swipe_x_neg: Option<u8>,
+    pub three_finger_swipe_x_pos: Option<u8>,
+    pub three_finger_swipe_y_neg: Option<u8>,
+    pub three_finger_swipe_y_pos: Option<u8>,
+    /// How two- and three-finger gestures are recognized.
     pub two_finger: TwoFingerConfig,
 }
 
@@ -320,6 +369,16 @@ impl Iqs5xxGestures {
         ]
     }
 
+    /// Each three-finger swipe's direction and key.
+    fn three_finger_swipes(&self) -> [(Point, Option<u8>); 4] {
+        [
+            ((-1, 0), self.three_finger_swipe_x_neg),
+            ((1, 0), self.three_finger_swipe_x_pos),
+            ((0, -1), self.three_finger_swipe_y_neg),
+            ((0, 1), self.three_finger_swipe_y_pos),
+        ]
+    }
+
     /// Whether the driver tracks two-finger touches at all.
     fn two_finger_motion(&self) -> bool {
         self.scroll || self.zoom() || self.two_finger_swipes().iter().any(|(_, key)| key.is_some())
@@ -338,8 +397,8 @@ struct Motion {
     fingers: u8,
     dx: i16,
     dy: i16,
-    /// Absolute positions of fingers 1 and 2; meaningful while that many are down.
-    points: [Point; 2],
+    /// Absolute positions of fingers 1 to 3; meaningful while that many are down.
+    points: [Point; 3],
     /// When the cycle was read.
     at_ms: u64,
 }
@@ -358,6 +417,12 @@ fn sub(a: Point, b: Point) -> Point {
 
 fn dot(a: Point, b: Point) -> i64 {
     i64::from(a.0) * i64::from(b.0) + i64::from(a.1) * i64::from(b.1)
+}
+
+/// The average motion of three fingers from `from` to `to`.
+fn average3(from: [Point; 3], to: [Point; 3]) -> Point {
+    let d = [0, 1, 2].map(|i| sub(to[i], from[i]));
+    ((d[0].0 + d[1].0 + d[2].0) / 3, (d[0].1 + d[1].1 + d[2].1) / 3)
 }
 
 /// The average motion of the two fingers from `from` to `to`.
@@ -472,6 +537,57 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
         }
     };
 
+    // Three fingers: a tap or a swipe, and nothing else for the rest of the touch, so
+    // fingers landing or lifting one by one don't move the cursor or scroll.
+    let had_three = state.touch.max_fingers >= 3;
+    if motion.fingers == 0 {
+        let touch = &state.touch;
+        if let Some(started_ms) = touch.started_ms
+            && touch.max_fingers == 3
+            && matches!(touch.three_finger, ThreeFingerState::Tracking { moved: false, .. })
+            && motion.at_ms.saturating_sub(started_ms) <= px.three_tap_ms
+        {
+            tap(gestures.three_finger_tap, &mut out);
+        }
+        state.touch = Touch::default();
+    } else {
+        state.touch.started_ms.get_or_insert(motion.at_ms);
+        state.touch.max_fingers = state.touch.max_fingers.max(motion.fingers);
+    }
+    if motion.fingers == 3 {
+        let now = motion.points;
+        state.touch.three_finger = match state.touch.three_finger {
+            ThreeFingerState::Idle => ThreeFingerState::Tracking {
+                start: now,
+                moved: false,
+            },
+            ThreeFingerState::Tracking { start, moved } => {
+                let moved_by = average3(start, now);
+                let swipe = gestures.three_finger_swipes().into_iter().find_map(|(dir, key)| {
+                    let key = key?;
+                    (within_angle(moved_by, dir, px.swipe_cos_permille, false)
+                        && dot(moved_by, dir) >= i64::from(px.three_swipe_along(dir)))
+                    .then_some(key)
+                });
+                match swipe {
+                    Some(key) => {
+                        tap(Some(key), &mut out);
+                        ThreeFingerState::Swiped
+                    }
+                    None => ThreeFingerState::Tracking {
+                        start,
+                        moved: moved || len(moved_by) >= px.decide,
+                    },
+                }
+            }
+            ThreeFingerState::Swiped => ThreeFingerState::Swiped,
+        };
+    }
+    if had_three || state.touch.max_fingers >= 3 {
+        state.two_finger = TwoFingerState::Idle;
+        return out;
+    }
+
     if motion.fingers != 2 {
         // Lifted soon after touching, far enough along a swipe: a flick.
         if let TwoFingerState::Flicking {
@@ -496,7 +612,7 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
         return out;
     }
 
-    let now = motion.points;
+    let now = [motion.points[0], motion.points[1]];
     state.two_finger = match state.two_finger {
         TwoFingerState::Idle => TwoFingerState::Deciding {
             start: now,
@@ -782,9 +898,9 @@ where
         // Motion block at 0x000C..0x0015 per table 8.1: previous cycle time
         // (§4.1.1), gesture events 0/1 (§8.10.1-§8.10.2), system info 0/1
         // (§8.10.3-§8.10.4), number of fingers (§5.2.1), relative XY (§5.2.2),
-        // then absolute X/Y, strength and area of fingers 1 and 2 (§5.2.3-§5.2.6),
-        // 7 bytes each at 0x0016 and 0x001D.
-        let mut data = [0u8; 24];
+        // then absolute X/Y, strength and area of fingers 1 to 3 (§5.2.3-§5.2.6),
+        // 7 bytes each at 0x0016, 0x001D and 0x0024.
+        let mut data = [0u8; 31];
         let mut operations = [
             // In theory, it's possible to skip the initial address selection
             // write if the last window closed cleanly and RMK has previously
@@ -822,7 +938,7 @@ where
             let coordinate = |at: usize| i32::from(u16::from_be_bytes([data[at], data[at + 1]]));
             (coordinate(at), coordinate(at + 2))
         };
-        let points = [point(10), point(17)];
+        let points = [point(10), point(17), point(24)];
 
         // §8.10.3: system_info_0.
         let charging_mode = match system_info_0 & 0b111 {
@@ -945,6 +1061,11 @@ mod tests {
         two_finger_swipe_x_pos: Some(10),
         two_finger_swipe_y_neg: None,
         two_finger_swipe_y_pos: None,
+        three_finger_tap: Some(11),
+        three_finger_swipe_x_neg: Some(12),
+        three_finger_swipe_x_pos: Some(13),
+        three_finger_swipe_y_neg: Some(14),
+        three_finger_swipe_y_pos: Some(15),
         two_finger: TwoFingerConfig {
             decide_percent: 4,
             zoom_cos_permille: 906,
@@ -952,6 +1073,8 @@ mod tests {
             swipe_percent: 20,
             swipe_ms: 250,
             swipe_cos_permille: 866,
+            three_swipe_percent: 15,
+            three_tap_ms: 300,
         },
     };
 
@@ -964,6 +1087,8 @@ mod tests {
         swipe: [100, 100],
         swipe_ms: 250,
         swipe_cos_permille: 866,
+        three_swipe: [150, 150],
+        three_tap_ms: 300,
     };
 
     fn one_finger(gesture_events_0: u8, dx: i16, dy: i16) -> Motion {
@@ -973,7 +1098,7 @@ mod tests {
             fingers: 1,
             dx,
             dy,
-            points: [(0, 0); 2],
+            points: [(0, 0); 3],
             at_ms: 0,
         }
     }
@@ -989,8 +1114,16 @@ mod tests {
             fingers: 2,
             dx: 0,
             dy: 0,
-            points: [a, b],
+            points: [a, b, (0, 0)],
             at_ms,
+        }
+    }
+
+    fn three_fingers_at(at_ms: u64, a: Point, b: Point, c: Point) -> Motion {
+        Motion {
+            fingers: 3,
+            points: [a, b, c],
+            ..two_fingers_at(at_ms, a, b)
         }
     }
 
@@ -1257,6 +1390,92 @@ mod tests {
         assert!(matches!(state.two_finger, TwoFingerState::Scrolling { .. }));
     }
 
+    const A: Point = (300, 500);
+    const B: Point = (450, 480);
+    const C: Point = (600, 500);
+
+    #[test]
+    fn three_fingers_tapping_click_once_all_lift() {
+        let (outs, _) = run(&[
+            Motion {
+                at_ms: 0,
+                ..one_finger(0, 0, 0)
+            },
+            two_fingers_at(10, A, B),
+            three_fingers_at(20, A, B, C),
+            three_fingers_at(60, (302, 501), (451, 480), (600, 502)), // a little jitter
+            two_fingers_at(120, A, B),
+            lifted_at(150),
+        ]);
+        assert_eq!(keys(&outs), vec![(11, true), (11, false)]);
+        assert!(axes(&outs).is_empty());
+    }
+
+    #[test]
+    fn a_slow_or_moving_three_finger_touch_is_no_tap() {
+        let (outs, _) = run(&[three_fingers_at(0, A, B, C), lifted_at(500)]);
+        assert!(keys(&outs).is_empty());
+        let (outs, _) = run(&[
+            three_fingers_at(0, A, B, C),
+            three_fingers_at(40, (300, 560), (450, 540), (600, 560)), // 60 px: moved
+            lifted_at(100),
+        ]);
+        assert!(keys(&outs).is_empty());
+    }
+
+    #[test]
+    fn four_fingers_are_no_three_finger_tap() {
+        let mut four = three_fingers_at(20, A, B, C);
+        four.fingers = 4;
+        let (outs, _) = run(&[three_fingers_at(0, A, B, C), four, lifted_at(100)]);
+        assert!(keys(&outs).is_empty());
+    }
+
+    #[test]
+    fn three_fingers_swipe_once_per_touch() {
+        let right = |x: i32| [(A.0 + x, A.1), (B.0 + x, B.1), (C.0 + x, C.1)];
+        let down = |y: i32| [(A.0, A.1 + y), (B.0, B.1 + y), (C.0, C.1 + y)];
+        let [a, b, c] = right(100);
+        let [a2, b2, c2] = right(160);
+        let [a3, b3, c3] = right(400);
+        let [a4, b4, c4] = right(640);
+        let [d, e, f] = down(160);
+        let (outs, _) = run(&[
+            three_fingers_at(0, A, B, C),
+            three_fingers_at(20, a, b, c),    // 100 px of the 150 a swipe needs
+            three_fingers_at(40, a2, b2, c2), // swipe right
+            three_fingers_at(60, a3, b3, c3), // further: nothing more
+            three_fingers_at(70, a4, b4, c4),
+            lifted_at(80),
+            three_fingers_at(200, A, B, C),
+            three_fingers_at(220, d, e, f), // swipe down
+            lifted_at(240),
+        ]);
+        assert_eq!(keys(&outs), vec![(13, true), (13, false), (15, true), (15, false)]);
+        assert!(axes(&outs).is_empty());
+    }
+
+    #[test]
+    fn a_three_finger_touch_never_scrolls_or_moves_the_cursor() {
+        let (outs, _) = run(&[
+            three_fingers_at(0, A, B, C),
+            two_fingers_at(20, A, B), // one finger lifts; the other two scroll down
+            two_fingers_at(40, (A.0, A.1 + 50), (B.0, B.1 + 50)),
+            two_fingers_at(60, (A.0, A.1 + 90), (B.0, B.1 + 90)),
+            Motion {
+                at_ms: 80,
+                ..one_finger(0, 5, 5)
+            },
+            lifted_at(400),
+            // A fresh two-finger touch scrolls again.
+            two_fingers_at(500, A, B),
+            two_fingers_at(520, (A.0, A.1 + 50), (B.0, B.1 + 50)),
+            two_fingers_at(540, (A.0, A.1 + 60), (B.0, B.1 + 60)),
+        ]);
+        assert!(keys(&outs).is_empty());
+        assert_eq!(axes(&outs), vec![[(Axis::H, 0), (Axis::V, 10)]]);
+    }
+
     #[test]
     fn a_third_finger_ends_the_two_finger_gesture() {
         let mut three = two_fingers((0, 0), (0, 0));
@@ -1285,6 +1504,8 @@ mod tests {
                 swipe: [60, 100],
                 swipe_ms: 250,
                 swipe_cos_permille: 866,
+                three_swipe: [90, 150],
+                three_tap_ms: 300,
             }
         );
         assert_eq!(px.swipe_along((-1, 0)), 60);

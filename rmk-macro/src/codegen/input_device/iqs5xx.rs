@@ -46,9 +46,14 @@ enum Gesture {
     TwoFingerSwipeXPos,
     TwoFingerSwipeYNeg,
     TwoFingerSwipeYPos,
+    ThreeFingerTap,
+    ThreeFingerSwipeXNeg,
+    ThreeFingerSwipeXPos,
+    ThreeFingerSwipeYNeg,
+    ThreeFingerSwipeYPos,
 }
 
-const GESTURES: [Gesture; 13] = [
+const GESTURES: [Gesture; 18] = [
     Gesture::SingleTap,
     Gesture::PressAndHold,
     Gesture::SwipeXNeg,
@@ -62,6 +67,11 @@ const GESTURES: [Gesture; 13] = [
     Gesture::TwoFingerSwipeXPos,
     Gesture::TwoFingerSwipeYNeg,
     Gesture::TwoFingerSwipeYPos,
+    Gesture::ThreeFingerTap,
+    Gesture::ThreeFingerSwipeXNeg,
+    Gesture::ThreeFingerSwipeXPos,
+    Gesture::ThreeFingerSwipeYNeg,
+    Gesture::ThreeFingerSwipeYPos,
 ];
 
 /// The action configured for `gesture`. Swipes are configured by cursor direction,
@@ -75,12 +85,19 @@ fn gesture_action(config: &Iqs5xxConfig, gesture: Gesture) -> Option<&String> {
         &g.two_finger_swipe_up,
         &g.two_finger_swipe_down,
     ];
+    let three = [
+        &g.three_finger_swipe_left,
+        &g.three_finger_swipe_right,
+        &g.three_finger_swipe_up,
+        &g.three_finger_swipe_down,
+    ];
     let ([left, right, up, down], sensor) = match gesture {
         Gesture::SingleTap => return g.single_tap.as_ref(),
         Gesture::PressAndHold => return g.press_and_hold.as_ref(),
         Gesture::TwoFingerTap => return g.two_finger_tap.as_ref(),
         Gesture::ZoomIn => return g.zoom_in.as_ref(),
         Gesture::ZoomOut => return g.zoom_out.as_ref(),
+        Gesture::ThreeFingerTap => return g.three_finger_tap.as_ref(),
         Gesture::SwipeXNeg => (one, (-1, 0)),
         Gesture::SwipeXPos => (one, (1, 0)),
         Gesture::SwipeYNeg => (one, (0, -1)),
@@ -89,6 +106,10 @@ fn gesture_action(config: &Iqs5xxConfig, gesture: Gesture) -> Option<&String> {
         Gesture::TwoFingerSwipeXPos => (two, (1, 0)),
         Gesture::TwoFingerSwipeYNeg => (two, (0, -1)),
         Gesture::TwoFingerSwipeYPos => (two, (0, 1)),
+        Gesture::ThreeFingerSwipeXNeg => (three, (-1, 0)),
+        Gesture::ThreeFingerSwipeXPos => (three, (1, 0)),
+        Gesture::ThreeFingerSwipeYNeg => (three, (0, -1)),
+        Gesture::ThreeFingerSwipeYPos => (three, (0, 1)),
     };
     let (mut x, mut y) = sensor;
     if config.proc_invert_x {
@@ -180,6 +201,11 @@ fn expand_gestures(
         two_finger_swipe_x_pos,
         two_finger_swipe_y_neg,
         two_finger_swipe_y_pos,
+        three_finger_tap,
+        three_finger_swipe_x_neg,
+        three_finger_swipe_x_pos,
+        three_finger_swipe_y_neg,
+        three_finger_swipe_y_pos,
     ] = GESTURES.map(key);
     let scroll = config.gestures.scroll;
     let scroll_both_axes = config.gestures.scroll_both_axes;
@@ -194,6 +220,8 @@ fn expand_gestures(
     let zoom_step_percent = config.gestures.zoom_step_percent.unwrap_or(6);
     let swipe_percent = config.gestures.two_finger_swipe_percent.unwrap_or(10);
     let swipe_ms = config.gestures.two_finger_swipe_ms.unwrap_or(250);
+    let three_swipe_percent = config.gestures.three_finger_swipe_percent.unwrap_or(15);
+    let three_tap_ms = config.gestures.three_finger_tap_ms.unwrap_or(300);
     let swipe_angle = config.gestures.two_finger_swipe_angle.unwrap_or(30);
     if swipe_angle >= 90 {
         panic!(
@@ -218,6 +246,11 @@ fn expand_gestures(
             two_finger_swipe_x_pos: #two_finger_swipe_x_pos,
             two_finger_swipe_y_neg: #two_finger_swipe_y_neg,
             two_finger_swipe_y_pos: #two_finger_swipe_y_pos,
+            three_finger_tap: #three_finger_tap,
+            three_finger_swipe_x_neg: #three_finger_swipe_x_neg,
+            three_finger_swipe_x_pos: #three_finger_swipe_x_pos,
+            three_finger_swipe_y_neg: #three_finger_swipe_y_neg,
+            three_finger_swipe_y_pos: #three_finger_swipe_y_pos,
             two_finger: ::rmk::input_device::iqs5xx::TwoFingerConfig {
                 decide_percent: #decide_percent,
                 zoom_cos_permille: #zoom_cos_permille,
@@ -225,6 +258,8 @@ fn expand_gestures(
                 swipe_percent: #swipe_percent,
                 swipe_ms: #swipe_ms,
                 swipe_cos_permille: #swipe_cos_permille,
+                three_swipe_percent: #three_swipe_percent,
+                three_tap_ms: #three_tap_ms,
             },
         }
     }

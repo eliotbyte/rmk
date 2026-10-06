@@ -1434,8 +1434,23 @@ pub struct Iqs5xxGesturesConfig {
     /// A two-finger swipe is a flick: the fingers lift within this many milliseconds
     /// of touching. Moving longer scrolls. Defaults to 250.
     pub two_finger_swipe_ms: Option<u16>,
-    /// How many degrees a two-finger swipe may stray from its direction. Defaults to 30.
+    /// How many degrees a two- or three-finger swipe may stray from its direction.
+    /// Defaults to 30.
     pub two_finger_swipe_angle: Option<u8>,
+    /// Three fingers tapping together, e.g. `"MouseBtn3"`.
+    pub three_finger_tap: Option<String>,
+    /// A three-finger tap lifts every finger within this many milliseconds of the first
+    /// touching. Defaults to 300.
+    pub three_finger_tap_ms: Option<u16>,
+    /// Three fingers moving together far in one direction: fires once per touch.
+    /// Directions are the cursor's, as for `swipe_*`.
+    pub three_finger_swipe_left: Option<String>,
+    pub three_finger_swipe_right: Option<String>,
+    pub three_finger_swipe_up: Option<String>,
+    pub three_finger_swipe_down: Option<String>,
+    /// How far the fingers move for a three-finger swipe, in percent of the trackpad's
+    /// size in that direction. Defaults to 15.
+    pub three_finger_swipe_percent: Option<u8>,
     /// Two-finger scrolling.
     #[serde(default)]
     pub scroll: bool,

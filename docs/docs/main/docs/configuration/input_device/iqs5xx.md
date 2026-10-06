@@ -111,8 +111,23 @@ zoom_out = "WM(Minus, LCtrl)"
 # two_finger_swipe_percent = 10
 # The fingers lift within this many milliseconds of touching. Default: 250.
 # two_finger_swipe_ms = 250
-# How many degrees a swipe may stray from its direction. Default: 30.
+# How many degrees a two- or three-finger swipe may stray from its direction.
+# Default: 30.
 # two_finger_swipe_angle = 30
+# Three fingers tapping together. The IC has no three-finger gestures; the
+# driver recognizes them. Every finger lifts within this many milliseconds of
+# the first touching. Default: 300.
+# three_finger_tap = "MouseBtn3"
+# three_finger_tap_ms = 300
+# Three fingers moving together far in one direction, once per touch. E.g.
+# Windows desktops and task view:
+# three_finger_swipe_left = "WM(Left, LCtrl | LGui)"
+# three_finger_swipe_right = "WM(Right, LCtrl | LGui)"
+# three_finger_swipe_down = "WM(D, LGui)"
+# three_finger_swipe_up = "WM(Tab, LGui)"
+# How far the fingers move, in percent of the trackpad's size in that
+# direction. Default: 15.
+# three_finger_swipe_percent = 15
 # Two-finger scrolling.
 scroll = true
 # Trackpad movement per scroll step; larger scrolls slower. Default: 8.
@@ -141,6 +156,8 @@ On a split keyboard use `[split.central.input_device.iqs5xx.gestures]` or
 | `zoom_in` / `zoom_out` | Two fingers move apart / together along the line between them |
 | `swipe_*` | One finger moves quickly in one direction |
 | `two_finger_swipe_*` | Two fingers flick in one direction and lift |
+| `three_finger_tap` | Three fingers tap together |
+| `three_finger_swipe_*` | Three fingers move together far in one direction, once per touch |
 
 The IC's own scroll and zoom aren't used: its zoom only checks that the
 distance between the fingers changed, so fingers drifting apart while scrolling
