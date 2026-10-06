@@ -481,12 +481,12 @@ where
             i2c_tx(&mut self.i2c, tag, &mut [Operation::Write(write)]).await?;
         }
 
-        // Zoom initial / consecutive distance, 2 bytes each at 0x06CC/0x06CE (§6.6), in
+        // Zoom initial / consecutive distance, 2 bytes each at 0x06CB-0x06CC / 0x06CD-0x06CE (§6.6), in
         // pixels of the resolution set above.
         let span = x_resolution.max(y_resolution);
         for (tag, addr, percent) in [
-            ("zoom_initial_distance", 0xCC, self.gestures.zoom_start_percent),
-            ("zoom_consecutive_distance", 0xCE, self.gestures.zoom_step_percent),
+            ("zoom_initial_distance", 0xCB, self.gestures.zoom_start_percent),
+            ("zoom_consecutive_distance", 0xCD, self.gestures.zoom_step_percent),
         ] {
             if let Some(percent) = percent {
                 let [high, low] = percent_of(span, percent).to_be_bytes();
