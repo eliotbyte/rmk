@@ -155,6 +155,7 @@ enum TwoFingerState {
     },
     Scrolling {
         last: [Point; 2],
+        axis: ScrollAxis,
     },
     /// Zooming; `base` is the finger distance at the last zoom step.
     Zooming {
@@ -170,6 +171,14 @@ enum TwoFingerState {
         dir: Point,
         key: u8,
     },
+}
+
+/// The axes a two-finger scroll moves along, fixed when it starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollAxis {
+    Both,
+    Horizontal,
+    Vertical,
 }
 
 /// How two-finger scroll and zoom are told apart.
@@ -259,6 +268,9 @@ pub struct Iqs5xxGestures {
     pub two_finger_tap: Option<u8>,
     /// Two fingers moving together scroll, published on the H/V axes.
     pub scroll: bool,
+    /// Scroll along both axes at once. Off, a scroll keeps to the axis it started
+    /// along until the fingers lift.
+    pub scroll_both_axes: bool,
     /// Two fingers moving apart / together: tapped once per zoom step.
     pub zoom_in: Option<u8>,
     pub zoom_out: Option<u8>,
@@ -442,7 +454,18 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
         tap(gestures.two_finger_tap, &mut out);
     }
 
-    let scroll = |moved: Point, out: &mut CycleOutput| {
+    // A scroll that starts with `moved` keeps to its main axis, unless both are allowed.
+    let scroll_axis = |moved: Point| match moved {
+        _ if gestures.scroll_both_axes => ScrollAxis::Both,
+        (h, v) if h.abs() > v.abs() => ScrollAxis::Horizontal,
+        _ => ScrollAxis::Vertical,
+    };
+    let scroll = |moved: Point, axis: ScrollAxis, out: &mut CycleOutput| {
+        let moved = match axis {
+            ScrollAxis::Both => moved,
+            ScrollAxis::Horizontal => (moved.0, 0),
+            ScrollAxis::Vertical => (0, moved.1),
+        };
         if gestures.scroll && moved != (0, 0) {
             let clamp = |x: i32| x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
             out.axes = Some([(Axis::H, clamp(moved.0)), (Axis::V, clamp(moved.1))]);
@@ -495,7 +518,10 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
                         dir,
                         key,
                     },
-                    None => TwoFingerState::Scrolling { last: now },
+                    None => TwoFingerState::Scrolling {
+                        last: now,
+                        axis: scroll_axis(moved),
+                    },
                 }
             }
             Some(TwoFinger::Zoom) => TwoFingerState::Zooming {
@@ -503,9 +529,9 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
             },
             None => TwoFingerState::Deciding { start, started_ms },
         },
-        TwoFingerState::Scrolling { last } => {
-            scroll(average(last, now), &mut out);
-            TwoFingerState::Scrolling { last: now }
+        TwoFingerState::Scrolling { last, axis } => {
+            scroll(average(last, now), axis, &mut out);
+            TwoFingerState::Scrolling { last: now, axis }
         }
         TwoFingerState::Flicking {
             start,
@@ -518,8 +544,9 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
             let slow = motion.at_ms.saturating_sub(started_ms) > px.swipe_ms;
             if slow || !within_angle(moved, dir, px.swipe_cos_permille, false) {
                 // Too slow or off the swipe's line: a scroll, caught up on the held-back motion.
-                scroll(moved, &mut out);
-                TwoFingerState::Scrolling { last: now }
+                let axis = scroll_axis(moved);
+                scroll(moved, axis, &mut out);
+                TwoFingerState::Scrolling { last: now, axis }
             } else {
                 TwoFingerState::Flicking {
                     start,
@@ -910,6 +937,7 @@ mod tests {
         swipe_y_pos: Some(5),
         two_finger_tap: Some(6),
         scroll: true,
+        scroll_both_axes: false,
         zoom_in: Some(7),
         zoom_out: Some(8),
         // Sideways only, so vertical two-finger motion still scrolls.
@@ -1183,11 +1211,41 @@ mod tests {
             two_fingers_at(60, (380, 570), (580, 570)),
         ]);
         assert!(keys(&outs).is_empty());
+        // Mostly down, so it keeps to vertical, the held-back motion included.
         assert_eq!(
             axes(&outs),
-            vec![[(Axis::H, -20), (Axis::V, 60)], [(Axis::H, 0), (Axis::V, 10)]]
+            vec![[(Axis::H, 0), (Axis::V, 60)], [(Axis::H, 0), (Axis::V, 10)]]
         );
         assert!(matches!(state.two_finger, TwoFingerState::Scrolling { .. }));
+    }
+
+    #[test]
+    fn a_vertical_scroll_ignores_sideways_motion_until_the_fingers_lift() {
+        let (outs, _) = run(&[
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((400, 540), (600, 540)), // decided: a vertical scroll
+            two_fingers((450, 545), (650, 545)), // mostly sideways now: only the 5 down count
+            two_fingers((500, 545), (700, 545)), // only sideways: nothing
+        ]);
+        assert_eq!(axes(&outs), vec![[(Axis::H, 0), (Axis::V, 5)]]);
+    }
+
+    #[test]
+    fn scroll_both_axes_scrolls_diagonally() {
+        let gestures = Iqs5xxGestures {
+            scroll_both_axes: true,
+            ..ALL
+        };
+        let mut state = GestureState::default();
+        let outs: Vec<_> = [
+            two_fingers((400, 500), (600, 500)),
+            two_fingers((400, 540), (600, 540)),
+            two_fingers((450, 545), (650, 545)),
+        ]
+        .iter()
+        .map(|motion| decode_cycle(&gestures, &PX, motion, &mut state))
+        .collect();
+        assert_eq!(axes(&outs), vec![[(Axis::H, 50), (Axis::V, 5)]]);
     }
 
     #[test]

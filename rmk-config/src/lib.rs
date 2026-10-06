@@ -1444,6 +1444,10 @@ pub struct Iqs5xxGesturesConfig {
     /// Content follows the fingers, as on a phone.
     #[serde(default)]
     pub natural_scroll: bool,
+    /// Scroll along both axes at once. Off by default: a scroll keeps to the axis it
+    /// started along until the fingers lift.
+    #[serde(default)]
+    pub scroll_both_axes: bool,
 }
 
 /// I²C bus configuration for the IQS5xx. Distinct from the generic `I2cConfig`

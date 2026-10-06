@@ -182,6 +182,7 @@ fn expand_gestures(
         two_finger_swipe_y_pos,
     ] = GESTURES.map(key);
     let scroll = config.gestures.scroll;
+    let scroll_both_axes = config.gestures.scroll_both_axes;
     let decide_percent = config.gestures.two_finger_decide_percent.unwrap_or(4);
     let zoom_angle = config.gestures.zoom_angle.unwrap_or(25);
     if zoom_angle >= 90 {
@@ -210,6 +211,7 @@ fn expand_gestures(
             swipe_y_pos: #swipe_y_pos,
             two_finger_tap: #two_finger_tap,
             scroll: #scroll,
+            scroll_both_axes: #scroll_both_axes,
             zoom_in: #zoom_in,
             zoom_out: #zoom_out,
             two_finger_swipe_x_neg: #two_finger_swipe_x_neg,

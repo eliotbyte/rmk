@@ -119,6 +119,9 @@ scroll = true
 scroll_divisor = 8
 # Content follows the fingers.
 natural_scroll = true
+# Scroll along both axes at once. Off by default: a scroll keeps to the axis it
+# started along, vertical or horizontal, until the fingers lift.
+# scroll_both_axes = false
 # One-finger swipes, by cursor direction. The cursor moves during a swipe too.
 # swipe_left = "..."
 # swipe_right = "..."
