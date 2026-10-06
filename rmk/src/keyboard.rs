@@ -46,6 +46,10 @@ pub(crate) mod steno;
 
 use crate::keymap::HOLD_BUFFER_SIZE;
 
+/// The longest a blocking macro holds back key events, so a macro with long
+/// delays can't freeze the keyboard.
+const MACRO_BLOCK_INPUT_MAX: Duration = Duration::from_secs(1);
+
 // Timestamp of the last key action, the value is the number of seconds since the boot
 #[cfg(feature = "_ble")]
 pub(crate) static LAST_KEY_TIMESTAMP: Signal<crate::RawMutex, u32> = Signal::new();
@@ -142,6 +146,21 @@ impl Runnable for Keyboard<'_> {
     /// The report is sent using `send_report`.
     async fn run(&mut self) -> ! {
         loop {
+            // A blocking macro leaves key events in the channel, so they are handled
+            // after it, in order, under the layers it left. The channel's publishers
+            // wait when it fills, so nothing is lost.
+            if self.keymap.macro_block_input() && self.keymap.macros(|m| m.is_playing()) {
+                let until = *self
+                    .macro_block_until
+                    .get_or_insert_with(|| Instant::now() + MACRO_BLOCK_INPUT_MAX);
+                if Instant::now() < until {
+                    Timer::at(self.next_deadline().map_or(until, |d| d.min(until))).await;
+                    self.fire_expired().await;
+                    continue;
+                }
+            } else {
+                self.macro_block_until = None;
+            }
             // Wait for the next event, but wake up at the earliest pending deadline.
             // `with_deadline` polls the subscriber first, so a queued event is handled first.
             let event = match self.next_deadline() {
@@ -206,6 +225,9 @@ pub struct Keyboard<'a> {
     /// When the next macro op may run.
     macro_due: Instant,
 
+    /// When a blocking macro stops holding back key events; set while one plays.
+    macro_block_until: Option<Instant>,
+
     /// The real state before fork activations is stored here
     fork_states: [Option<ActiveFork>; FORK_MAX_NUM], // chosen replacement key of the currently triggered forks and the related modifier suppression
     fork_keep_mask: ModifierCombination, // aggregate here the explicit modifiers pressed since the last fork activations
@@ -248,6 +270,7 @@ impl<'a> Keyboard<'a> {
             user_hold: None,
             caps_word: CapsWordState::default(),
             macro_due: Instant::from_ticks(0),
+            macro_block_until: None,
             fork_states: [None; FORK_MAX_NUM],
             fork_keep_mask: ModifierCombination::default(),
             held_buffer: HeldBuffer::new(),

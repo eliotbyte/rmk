@@ -558,6 +558,7 @@ pub(crate) fn expand_behavior_config(behavior: &Behavior) -> proc_macro2::TokenS
     let one_shot_modifiers = expand_one_shot_modifiers(&behavior.one_shot_modifiers);
     let combos = expand_combos(&behavior.combos, &profiles);
     let macros = expand_macros(&behavior.macros);
+    let macro_block_input = behavior.macros.as_ref().is_some_and(|m| m.block_input);
     let forks = expand_forks(&behavior.forks, &profiles);
     let morse = expand_morse(&behavior.morse);
     let auto_mouse_layer = expand_auto_mouse_layer(&behavior.auto_mouse_layer);
@@ -572,6 +573,7 @@ pub(crate) fn expand_behavior_config(behavior: &Behavior) -> proc_macro2::TokenS
             fork: #forks,
             morse: #morse,
             keyboard_macros: #macros,
+            macro_block_input: #macro_block_input,
             mouse_key: ::rmk::config::MouseKeyConfig::default(),
             tap: ::rmk::config::TapConfig::default(),
             auto_mouse_layer: #auto_mouse_layer,

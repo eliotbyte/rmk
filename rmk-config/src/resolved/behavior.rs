@@ -50,6 +50,7 @@ pub struct Combo {
 
 pub struct Macros {
     pub macros: Vec<Macro>,
+    pub block_input: bool,
 }
 
 pub struct Macro {
@@ -153,6 +154,7 @@ impl crate::KeyboardTomlConfig {
                     operations: mc.operations.into_iter().map(resolve_macro_operation).collect(),
                 })
                 .collect(),
+            block_input: m.block_input,
         });
 
         let forks = toml_behavior.fork.map(|f| Forks {

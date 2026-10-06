@@ -27,6 +27,10 @@ pub struct BehaviorConfig {
     /// flash replaces its default. Check a hand-written table with
     /// `const _: () = assert!(validate_default_macros(MACROS));`.
     pub keyboard_macros: &'static [&'static [MacroOp]],
+    /// Hold back key events while a macro plays, then process them in order, so
+    /// typing never lands inside a macro and sees the layers the macro left.
+    /// Input stays blocked for at most a second.
+    pub macro_block_input: bool,
     pub mouse_key: MouseKeyConfig,
     pub auto_mouse_layer: Vec<AutoMouseLayerConfig, AUTO_MOUSE_LAYER_MAX_NUM>,
 }

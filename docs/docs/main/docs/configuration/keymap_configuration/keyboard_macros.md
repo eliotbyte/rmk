@@ -87,6 +87,19 @@ KeyAction::TapHold(Action::TriggerMacro(1), Action::LayerOn(1), u8::MAX)
 
 Macros run one at a time: a macro triggered while another is running waits its turn. A `Macro(n)` step works the same way, so macro `n` runs after the current macro, not in its place. Don't let a macro trigger itself, directly or through another macro: it repeats until the keyboard restarts.
 
+## Typing while a macro runs
+
+By default, keys you press while a macro runs are sent right away, so they can land between the macro's steps. With `block_input`, the keyboard holds them back until the macro ends and then handles them in order, under the layers the macro left active. A macro that ends on `MO(1)` before a pause for release puts the keys you type next on layer 1.
+
+```toml
+[behavior.macro]
+block_input = true
+```
+
+In Rust, set `BehaviorConfig::macro_block_input` to `true`.
+
+The keys are held back for at most one second, so a macro with long delays can't freeze the keyboard. A tap-hold key pressed while input is held back is timed from when the macro ends, not from when you pressed it.
+
 ## Editing macros from a host
 
 Rynk and Vial save edited macros to flash. Without the `storage` feature, Rynk can't edit macros, and Vial's edits last until the keyboard restarts.

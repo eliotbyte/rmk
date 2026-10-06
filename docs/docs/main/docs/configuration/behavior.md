@@ -141,6 +141,13 @@ operations = [
 ]
 ```
 
+Set `block_input = true` to hold back the keys you type while a macro runs and send them after it, in order. See [Typing while a macro runs](./keymap_configuration/keyboard_macros.md#typing-while-a-macro-runs).
+
+```toml
+[behavior.macro]
+block_input = true
+```
+
 ## Morse (and TapDance)
 
 In the `morse` sub-table, you can configure the keyboard's morse functionality. Morse is a superset of the well-known [tap dance](https://docs.qmk.fm/features/tap_dance), enabling you to assign different actions to various combinations of taps and holds performed within a specific time window.

@@ -607,6 +607,10 @@ impl<'a> KeyMap<'a> {
         self.inner.borrow().behavior.combo.prior_idle_time
     }
 
+    pub(crate) fn macro_block_input(&self) -> bool {
+        self.inner.borrow().behavior.macro_block_input
+    }
+
     pub(crate) fn one_shot_timeout(&self) -> Duration {
         self.inner.borrow().behavior.one_shot.timeout
     }

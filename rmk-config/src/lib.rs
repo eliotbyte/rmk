@@ -967,7 +967,11 @@ pub(crate) struct ComboConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MacrosConfig {
+    #[serde(default)]
     pub macros: Vec<MacroConfig>,
+    /// Hold back key events while a macro plays, see `BehaviorConfig::macro_block_input`
+    #[serde(default)]
+    pub block_input: bool,
 }
 
 /// Configurations for macro
