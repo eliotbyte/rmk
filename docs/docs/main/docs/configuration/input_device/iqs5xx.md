@@ -118,6 +118,9 @@ On a split keyboard use `[split.central.input_device.iqs5xx.gestures]` or
 | `zoom_in` / `zoom_out` | Two fingers move apart / together |
 | `swipe_*` | One finger moves quickly in one direction |
 
+A two-finger touch keeps the gesture it started with: once it scrolls it won't
+zoom, and once it zooms it won't scroll, until fewer than two fingers remain.
+
 Gestures press virtual keys (`KeyboardEventPos::Virtual`): their actions are in
 `BehaviorConfig::virtual_keys`, and scrolling reaches the `PointingProcessor` on
 the `H`/`V` axes, where `device_scroll` turns it into wheel and pan reports.

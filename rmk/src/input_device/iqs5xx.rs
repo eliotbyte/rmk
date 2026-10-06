@@ -122,8 +122,24 @@ where
 
     gestures: Iqs5xxGestures,
 
+    state: GestureState,
+}
+
+/// Gesture state carried from one cycle to the next.
+#[derive(Debug, Default)]
+struct GestureState {
     /// Whether the press-and-hold virtual key is down.
     holding: bool,
+    /// The two-finger gesture this touch settled on. The IC switches between scroll
+    /// and zoom mid-touch (§6.7), so fingers drifting apart while scrolling would
+    /// zoom; instead the first one keeps the touch until fewer than two fingers remain.
+    two_finger: Option<TwoFinger>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TwoFinger {
+    Scroll,
+    Zoom,
 }
 
 /// The IQS5xx's built-in gestures (§6) to enable, each with the index of the
@@ -186,6 +202,7 @@ fn scale_distance(distance: u16, percent: u16) -> u16 {
 struct Motion {
     gesture_events_0: u8,
     gesture_events_1: u8,
+    fingers: u8,
     dx: i16,
     dy: i16,
 }
@@ -198,9 +215,9 @@ struct CycleOutput {
     axes: Option<[(Axis, i16); 2]>,
 }
 
-/// Decode a cycle's gesture bits (§8.10.1-§8.10.2) against the enabled gestures.
-/// `holding` is whether the press-and-hold key is down; it is updated here.
-fn decode_cycle(gestures: &Iqs5xxGestures, motion: &Motion, holding: &mut bool) -> CycleOutput {
+/// Decode a cycle's gesture bits (§8.10.1-§8.10.2) against the enabled gestures,
+/// updating the state carried between cycles.
+fn decode_cycle(gestures: &Iqs5xxGestures, motion: &Motion, state: &mut GestureState) -> CycleOutput {
     let mut out = CycleOutput::default();
     let tap = |key: Option<u8>, out: &mut CycleOutput| {
         if let Some(key) = key {
@@ -213,9 +230,9 @@ fn decode_cycle(gestures: &Iqs5xxGestures, motion: &Motion, holding: &mut bool) 
 
     let hold = g0 & 0b10 != 0;
     if let Some(key) = gestures.press_and_hold
-        && hold != *holding
+        && hold != state.holding
     {
-        *holding = hold;
+        state.holding = hold;
         let _ = out.keys.push((key, hold));
     }
     if g0 & 0b1 != 0 {
@@ -233,6 +250,24 @@ fn decode_cycle(gestures: &Iqs5xxGestures, motion: &Motion, holding: &mut bool) 
     }
     if g1 & 0b1 != 0 {
         tap(gestures.two_finger_tap, &mut out);
+    }
+
+    if motion.fingers < 2 {
+        state.two_finger = None;
+    }
+    let two_finger = if g1 & 0b100 != 0 {
+        Some(TwoFinger::Zoom)
+    } else if g1 & 0b10 != 0 {
+        Some(TwoFinger::Scroll)
+    } else {
+        None
+    };
+    if let Some(gesture) = two_finger {
+        match state.two_finger {
+            // The other gesture took over mid-touch: drop it, motion included.
+            Some(locked) if locked != gesture => return out,
+            _ => state.two_finger = Some(gesture),
+        }
     }
 
     // During scroll and zoom the relative registers carry the gesture, not the cursor.
@@ -328,7 +363,7 @@ where
             initialized: false,
             pointing_device_id: rmk_id,
             gestures: Iqs5xxGestures::default(),
-            holding: false,
+            state: GestureState::default(),
         }
     }
 
@@ -555,6 +590,7 @@ where
         Ok(Motion {
             gesture_events_0,
             gesture_events_1,
+            fingers: number_of_fingers,
             dx,
             dy,
         })
@@ -574,10 +610,10 @@ where
             // can reset and require re-initialization.
             // A reset mid-drag must not leave the press-and-hold key down.
             if !self.initialized
-                && self.holding
+                && self.state.holding
                 && let Some(key) = self.gestures.press_and_hold
             {
-                self.holding = false;
+                self.state.holding = false;
                 Self::publish_virtual_key(key, false).await;
             }
             if !self.initialized
@@ -592,7 +628,7 @@ where
             }
             match self.read_motion().await {
                 Ok(motion) => {
-                    let out = decode_cycle(&self.gestures, &motion, &mut self.holding);
+                    let out = decode_cycle(&self.gestures, &motion, &mut self.state);
                     for (key, pressed) in out.keys {
                         Self::publish_virtual_key(key, pressed).await;
                     }
@@ -635,12 +671,25 @@ mod tests {
         zoom_distance_percent: None,
     };
 
+    /// A cycle with one finger down, or two when it reports a scroll or zoom.
     fn motion(gesture_events_0: u8, gesture_events_1: u8, dx: i16, dy: i16) -> Motion {
+        let fingers = if gesture_events_1 & 0b110 != 0 { 2 } else { 1 };
         Motion {
             gesture_events_0,
             gesture_events_1,
+            fingers,
             dx,
             dy,
+        }
+    }
+
+    fn lifted() -> Motion {
+        Motion {
+            gesture_events_0: 0,
+            gesture_events_1: 0,
+            fingers: 0,
+            dx: 0,
+            dy: 0,
         }
     }
 
@@ -676,67 +725,97 @@ mod tests {
 
     #[test]
     fn plain_motion_moves_the_cursor() {
-        let out = decode_cycle(&ALL, &motion(0, 0, 3, -4), &mut false);
+        let out = decode_cycle(&ALL, &motion(0, 0, 3, -4), &mut GestureState::default());
         assert!(keys(&out).is_empty());
         assert_eq!(out.axes, Some([(Axis::X, 3), (Axis::Y, -4)]));
     }
 
     #[test]
     fn taps_press_and_release_their_keys() {
-        let out = decode_cycle(&ALL, &motion(0b1, 0, 0, 0), &mut false);
+        let out = decode_cycle(&ALL, &motion(0b1, 0, 0, 0), &mut GestureState::default());
         assert_eq!(keys(&out), &[(0, true), (0, false)]);
         assert_eq!(out.axes, None);
-        let out = decode_cycle(&ALL, &motion(0, 0b1, 0, 0), &mut false);
+        let out = decode_cycle(&ALL, &motion(0, 0b1, 0, 0), &mut GestureState::default());
         assert_eq!(keys(&out), &[(6, true), (6, false)]);
     }
 
     #[test]
     fn swipes_map_to_their_bits() {
         for (bit, key) in [(2, 2), (3, 3), (4, 5), (5, 4)] {
-            let out = decode_cycle(&ALL, &motion(1 << bit, 0, 0, 0), &mut false);
+            let out = decode_cycle(&ALL, &motion(1 << bit, 0, 0, 0), &mut GestureState::default());
             assert_eq!(keys(&out), &[(key, true), (key, false)], "bit {bit}");
         }
     }
 
     #[test]
     fn press_and_hold_stays_down_and_drags() {
-        let mut holding = false;
-        let out = decode_cycle(&ALL, &motion(0b10, 0, 0, 0), &mut holding);
+        let mut state = GestureState::default();
+        let out = decode_cycle(&ALL, &motion(0b10, 0, 0, 0), &mut state);
         assert_eq!(keys(&out), &[(1, true)]);
-        assert!(holding);
+        assert!(state.holding);
         // Still held: no key change, the cursor moves.
-        let out = decode_cycle(&ALL, &motion(0b10, 0, 5, 1), &mut holding);
+        let out = decode_cycle(&ALL, &motion(0b10, 0, 5, 1), &mut state);
         assert!(keys(&out).is_empty());
         assert_eq!(out.axes, Some([(Axis::X, 5), (Axis::Y, 1)]));
-        let out = decode_cycle(&ALL, &motion(0, 0, 0, 0), &mut holding);
+        let out = decode_cycle(&ALL, &lifted(), &mut state);
         assert_eq!(keys(&out), &[(1, false)]);
-        assert!(!holding);
+        assert!(!state.holding);
     }
 
     #[test]
     fn two_finger_scroll_goes_to_the_scroll_axes() {
-        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut false);
+        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut GestureState::default());
         assert!(keys(&out).is_empty());
         assert_eq!(out.axes, Some([(Axis::H, 0), (Axis::V, -7)]));
     }
 
     #[test]
     fn zoom_taps_in_or_out_by_sign_and_never_moves_the_cursor() {
-        let out = decode_cycle(&ALL, &motion(0, 0b100, 12, 0), &mut false);
+        let out = decode_cycle(&ALL, &motion(0, 0b100, 12, 0), &mut GestureState::default());
         assert_eq!(keys(&out), &[(7, true), (7, false)]);
         assert_eq!(out.axes, None);
-        let out = decode_cycle(&ALL, &motion(0, 0b100, -12, 0), &mut false);
+        let out = decode_cycle(&ALL, &motion(0, 0b100, -12, 0), &mut GestureState::default());
         assert_eq!(keys(&out), &[(8, true), (8, false)]);
         assert_eq!(out.axes, None);
     }
 
     #[test]
+    fn a_scroll_is_not_taken_over_by_zoom_until_the_fingers_lift() {
+        let mut state = GestureState::default();
+        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut state);
+        assert_eq!(out.axes, Some([(Axis::H, 0), (Axis::V, -7)]));
+        // The fingers drift apart: the IC reports a zoom, which is dropped.
+        let out = decode_cycle(&ALL, &motion(0, 0b100, 12, 0), &mut state);
+        assert!(keys(&out).is_empty());
+        assert_eq!(out.axes, None);
+        // Back to scrolling within the same touch.
+        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -3), &mut state);
+        assert_eq!(out.axes, Some([(Axis::H, 0), (Axis::V, -3)]));
+        // A new touch can zoom.
+        decode_cycle(&ALL, &lifted(), &mut state);
+        let out = decode_cycle(&ALL, &motion(0, 0b100, 12, 0), &mut state);
+        assert_eq!(keys(&out), &[(7, true), (7, false)]);
+    }
+
+    #[test]
+    fn a_zoom_is_not_taken_over_by_scroll_until_the_fingers_lift() {
+        let mut state = GestureState::default();
+        decode_cycle(&ALL, &motion(0, 0b100, -12, 0), &mut state);
+        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut state);
+        assert_eq!(out.axes, None);
+        // One finger lifted ends the two-finger gesture.
+        decode_cycle(&ALL, &motion(0, 0, 0, 0), &mut state);
+        let out = decode_cycle(&ALL, &motion(0, 0b10, 0, -7), &mut state);
+        assert_eq!(out.axes, Some([(Axis::H, 0), (Axis::V, -7)]));
+    }
+
+    #[test]
     fn gestures_without_a_key_are_ignored() {
         let none = Iqs5xxGestures::default();
-        let mut holding = false;
-        let out = decode_cycle(&none, &motion(0b11_1111, 0b001, 2, 2), &mut holding);
+        let mut state = GestureState::default();
+        let out = decode_cycle(&none, &motion(0b11_1111, 0b001, 2, 2), &mut state);
         assert!(keys(&out).is_empty());
-        assert!(!holding);
+        assert!(!state.holding);
         assert_eq!(out.axes, Some([(Axis::X, 2), (Axis::Y, 2)]));
     }
 }
