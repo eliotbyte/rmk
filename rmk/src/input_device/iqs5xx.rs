@@ -183,7 +183,7 @@ pub struct TwoFingerConfig {
     /// the trackpad's longer side.
     pub zoom_step_percent: u8,
     /// How far both fingers move together for a two-finger swipe, in percent of the
-    /// trackpad's longer side.
+    /// trackpad's size in the swipe's direction.
     pub swipe_percent: u8,
     /// A two-finger swipe keeps within this angle of its axis; it's `cos(angle)` in
     /// permille (30° is 866).
@@ -196,7 +196,7 @@ impl Default for TwoFingerConfig {
             decide_percent: 4,
             zoom_cos_permille: 906,
             zoom_step_percent: 6,
-            swipe_percent: 25,
+            swipe_percent: 15,
             swipe_cos_permille: 866,
         }
     }
@@ -208,19 +208,28 @@ struct TwoFingerPx {
     decide: u32,
     zoom_step: u32,
     zoom_cos_permille: u32,
-    swipe: u32,
+    /// Swipe distance along X and along Y: two fingers side by side have far less room
+    /// across the trackpad's short side than a share of its long side.
+    swipe: [u32; 2],
     swipe_cos_permille: u32,
 }
 
 impl TwoFingerPx {
-    fn new(config: &TwoFingerConfig, span: u16) -> Self {
+    fn new(config: &TwoFingerConfig, x_resolution: u16, y_resolution: u16) -> Self {
+        let span = x_resolution.max(y_resolution);
+        let swipe = |resolution| u32::from(percent_of(resolution, config.swipe_percent)).max(1);
         Self {
             decide: u32::from(percent_of(span, config.decide_percent)),
             zoom_step: u32::from(percent_of(span, config.zoom_step_percent)).max(1),
             zoom_cos_permille: u32::from(config.zoom_cos_permille.min(1000)),
-            swipe: u32::from(percent_of(span, config.swipe_percent)).max(1),
+            swipe: [swipe(x_resolution), swipe(y_resolution)],
             swipe_cos_permille: u32::from(config.swipe_cos_permille.min(1000)),
         }
+    }
+
+    /// The swipe distance along `dir`, a unit vector on one axis.
+    fn swipe_along(&self, dir: Point) -> u32 {
+        self.swipe[usize::from(dir.0 == 0)]
     }
 }
 
@@ -469,7 +478,7 @@ fn decode_cycle(gestures: &Iqs5xxGestures, px: &TwoFingerPx, motion: &Motion, st
             if !within_angle(moved, dir, px.swipe_cos_permille, false) {
                 // Turned away from the swipe: scroll instead.
                 TwoFingerState::Scrolling { last: now }
-            } else if dot(moved, dir) >= i64::from(px.swipe) {
+            } else if dot(moved, dir) >= i64::from(px.swipe_along(dir)) {
                 tap(Some(key), &mut out);
                 TwoFingerState::Done
             } else {
@@ -682,7 +691,7 @@ where
             i2c_tx(&mut self.i2c, tag, &mut [Operation::Write(write)]).await?;
         }
 
-        self.two_finger_px = TwoFingerPx::new(&self.gestures.two_finger, x_resolution.max(y_resolution));
+        self.two_finger_px = TwoFingerPx::new(&self.gestures.two_finger, x_resolution, y_resolution);
 
         i2c_tx(&mut self.i2c, "end_session", &mut [Operation::Write(&END_SESSION[..])]).await?;
 
@@ -877,7 +886,7 @@ mod tests {
         decide: 40,
         zoom_step: 60,
         zoom_cos_permille: 906,
-        swipe: 200,
+        swipe: [200, 200],
         swipe_cos_permille: 866,
     };
 
@@ -1120,16 +1129,19 @@ mod tests {
         assert_eq!(percent_of(2304, 15), 345);
         assert_eq!(percent_of(2304, 0), 0);
         assert_eq!(percent_of(u16::MAX, 255), u16::MAX);
-        let px = TwoFingerPx::new(&TwoFingerConfig::default(), 1000);
+        // Longer along Y: decide and zoom follow Y, a swipe follows its own axis.
+        let px = TwoFingerPx::new(&TwoFingerConfig::default(), 600, 1000);
         assert_eq!(
             px,
             TwoFingerPx {
                 decide: 40,
                 zoom_step: 60,
                 zoom_cos_permille: 906,
-                swipe: 250,
+                swipe: [90, 150],
                 swipe_cos_permille: 866,
             }
         );
+        assert_eq!(px.swipe_along((-1, 0)), 90);
+        assert_eq!(px.swipe_along((0, 1)), 150);
     }
 }

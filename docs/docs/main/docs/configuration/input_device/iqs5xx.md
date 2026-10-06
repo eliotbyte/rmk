@@ -106,8 +106,9 @@ zoom_out = "WM(Minus, LCtrl)"
 # two_finger_swipe_left = "MouseBtn5"
 # two_finger_swipe_up = "..."
 # two_finger_swipe_down = "..."
-# How far the fingers move, in percent of the longer side. Default: 25.
-# two_finger_swipe_percent = 25
+# How far the fingers move, in percent of the trackpad's size in that
+# direction. Default: 15.
+# two_finger_swipe_percent = 15
 # How many degrees a swipe may stray from its direction. Default: 30.
 # two_finger_swipe_angle = 30
 # Two-finger scrolling.
