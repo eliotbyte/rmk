@@ -1429,8 +1429,11 @@ pub struct Iqs5xxGesturesConfig {
     pub two_finger_swipe_up: Option<String>,
     pub two_finger_swipe_down: Option<String>,
     /// How far the fingers move for a two-finger swipe, in percent of the trackpad's
-    /// size in that direction. Defaults to 15.
+    /// size in that direction. Defaults to 10.
     pub two_finger_swipe_percent: Option<u8>,
+    /// A two-finger swipe is a flick: the fingers lift within this many milliseconds
+    /// of touching. Moving longer scrolls. Defaults to 250.
+    pub two_finger_swipe_ms: Option<u16>,
     /// How many degrees a two-finger swipe may stray from its direction. Defaults to 30.
     pub two_finger_swipe_angle: Option<u8>,
     /// Two-finger scrolling.

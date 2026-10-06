@@ -191,7 +191,8 @@ fn expand_gestures(
     }
     let zoom_cos_permille = (f64::from(zoom_angle).to_radians().cos() * 1000.0).round() as u16;
     let zoom_step_percent = config.gestures.zoom_step_percent.unwrap_or(6);
-    let swipe_percent = config.gestures.two_finger_swipe_percent.unwrap_or(15);
+    let swipe_percent = config.gestures.two_finger_swipe_percent.unwrap_or(10);
+    let swipe_ms = config.gestures.two_finger_swipe_ms.unwrap_or(250);
     let swipe_angle = config.gestures.two_finger_swipe_angle.unwrap_or(30);
     if swipe_angle >= 90 {
         panic!(
@@ -220,6 +221,7 @@ fn expand_gestures(
                 zoom_cos_permille: #zoom_cos_permille,
                 zoom_step_percent: #zoom_step_percent,
                 swipe_percent: #swipe_percent,
+                swipe_ms: #swipe_ms,
                 swipe_cos_permille: #swipe_cos_permille,
             },
         }
