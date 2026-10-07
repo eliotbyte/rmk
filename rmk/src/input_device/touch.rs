@@ -376,6 +376,11 @@ enum TwoFinger {
         last: [Point; 2],
         axis: ScrollAxis,
     },
+    /// Only one of the two fingers moves: it moves the cursor, from `last`.
+    Pointing {
+        finger: usize,
+        last: Point,
+    },
     /// Zooming; `base` is the finger distance at the last zoom step.
     Zooming {
         base: u32,
@@ -701,7 +706,18 @@ impl Recognizer {
 
         // A hold keeps its key down until no finger is left, and nothing else happens
         // meanwhile.
-        if let Some(drag) = &mut self.drag {
+        if let Some(mut drag) = self.drag {
+            // Two fingers scroll while the drag holds its button, and one of them moving
+            // alone moves the cursor, so another finger can take over.
+            let two_fingers = frame.count >= 2 && drag.lifted_ms.is_none();
+            if !two_fingers && self.two_finger != TwoFinger::Idle {
+                self.end_two_fingers(frame.at_ms, &mut out);
+                drag.lead = Drag::any_finger(frame);
+                if frame.count > 0 {
+                    self.drag = Some(drag);
+                    return out;
+                }
+            }
             match (frame.count, drag.lifted_ms) {
                 (0, Some(_)) => {}
                 (0, None) => {
@@ -715,13 +731,29 @@ impl Recognizer {
                     } else {
                         let _ = out.keys.push((drag.gesture, false));
                         self.reset();
+                        return out;
                     }
                 }
-                // A finger back within drag lock: the drag goes on from where it is.
-                (_, Some(_)) => {
+                // Fingers back within drag lock: the drag goes on from where they are.
+                (count, Some(_)) => {
                     drag.lifted_ms = None;
-                    drag.relock = Some((frame.at_ms, 0));
+                    // Two fingers aren't a tap that ends the drag.
+                    drag.relock = Some((frame.at_ms, if count >= 2 { u32::MAX } else { 0 }));
                     drag.lead = Drag::any_finger(frame);
+                    if count >= 2 {
+                        self.drag = Some(drag);
+                        self.two_fingers(frame, &|_| false, &mut out);
+                        return out;
+                    }
+                }
+                _ if two_fingers => {
+                    if let Some((_, travel)) = &mut drag.relock {
+                        *travel = u32::MAX;
+                    }
+                    self.drag = Some(drag);
+                    // No zoom or swipes while dragging: only scrolling and the cursor.
+                    self.two_fingers(frame, &|_| false, &mut out);
+                    return out;
                 }
                 _ => {
                     let step = drag.follow(&previous, frame, self.px.decide * 4);
@@ -731,6 +763,7 @@ impl Recognizer {
                     out.cursor(step);
                 }
             }
+            self.drag = Some(drag);
             return out;
         }
 
@@ -780,10 +813,11 @@ impl Recognizer {
                 self.end_two_fingers(frame.at_ms, &mut out);
                 // The finger left over from a scroll or zoom doesn't move the cursor.
                 let after_two_fingers = self.touch.is_some_and(|t| t.max_fingers >= 2 && t.acted);
+                // A finger keeps its slot while another lifts, so its motion goes on
+                // without a jump.
                 if !after_two_fingers
                     && let Some(i) = frame.slots.iter().position(Option::is_some)
                     && let (Some(now), Some(last)) = (frame.slots[i], previous[i])
-                    && previous.iter().flatten().count() == 1
                 {
                     out.cursor(sub(now, last));
                 }
@@ -978,11 +1012,26 @@ impl Recognizer {
                 Some(TwoFingerKind::Zoom) => TwoFinger::Zooming {
                     base: len(sub(start[1], start[0])),
                 },
+                // The held-back motion moves the cursor too.
+                Some(TwoFingerKind::Point(finger)) => {
+                    out.cursor(sub(now[finger], start[finger]));
+                    TwoFinger::Pointing {
+                        finger,
+                        last: now[finger],
+                    }
+                }
                 None => TwoFinger::Deciding { start, started_ms },
             },
             TwoFinger::Scrolling { last, axis } => {
-                scroll(average(last, now), axis, out);
+                scroll(common(last, now), axis, out);
                 TwoFinger::Scrolling { last: now, axis }
+            }
+            TwoFinger::Pointing { finger, last } => {
+                out.cursor(sub(now[finger], last));
+                TwoFinger::Pointing {
+                    finger,
+                    last: now[finger],
+                }
             }
             TwoFinger::Flicking {
                 start,
@@ -996,7 +1045,7 @@ impl Recognizer {
                 if slow || !within_angle(moved, dir, self.config.swipe_cos_permille.into(), false) {
                     // Too slow or off the swipe's line: a scroll, caught up on the held-back motion.
                     let axis = scroll_axis(moved);
-                    scroll(moved, axis, out);
+                    scroll(common(start, now), axis, out);
                     TwoFinger::Scrolling { last: now, axis }
                 } else {
                     TwoFinger::Flicking {
@@ -1027,8 +1076,11 @@ impl Recognizer {
                 }
             }
         }
-        if !matches!(self.two_finger, TwoFinger::Idle | TwoFinger::Deciding { .. })
-            && let Some(touch) = &mut self.touch
+        // Moving the cursor with one of two fingers is no gesture.
+        if !matches!(
+            self.two_finger,
+            TwoFinger::Idle | TwoFinger::Deciding { .. } | TwoFinger::Pointing { .. }
+        ) && let Some(touch) = &mut self.touch
         {
             touch.acted = true;
         }
@@ -1039,11 +1091,14 @@ impl Recognizer {
 enum TwoFingerKind {
     Scroll,
     Zoom,
+    /// Only this finger moves.
+    Point(usize),
 }
 
 /// Tell a two-finger touch that moved from `start` to `now` apart: a zoom when both
 /// fingers move in opposite directions along the line between them, a scroll when
-/// they move the same way, or `None` while that is still unclear.
+/// both move the same way at a similar speed, a cursor move when only one moves, or
+/// `None` while that is still unclear.
 fn classify(
     start: [Point; 2],
     now: [Point; 2],
@@ -1068,12 +1123,34 @@ fn classify(
     {
         return Some(TwoFingerKind::Zoom);
     }
-    // Within 45° of each other; failing that, scroll once it has moved a lot, so a
-    // touch that never settles still does something harmless.
-    if within_angle(d1, d2, 707, false) || travel >= 3 * px.decide {
+    let (l1, l2) = (len(d1), len(d2));
+    let (slow, fast) = (l1.min(l2), l1.max(l2));
+    let faster = usize::from(l2 > l1);
+    // Both moving within 45° of each other, neither more than three times as fast.
+    if slow >= px.decide / 4 && slow * 3 >= fast && within_angle(d1, d2, 707, false) {
         return Some(TwoFingerKind::Scroll);
     }
+    // One finger moving while the other stays put; failing anything else, the faster
+    // one moves the cursor once it has moved a lot, which is harmless.
+    if (fast >= px.decide && slow < px.decide / 4) || travel >= 3 * px.decide {
+        return Some(TwoFingerKind::Point(faster));
+    }
     None
+}
+
+/// The motion two fingers share from `from` to `to`: on each axis, the smaller of
+/// their motions if they go the same way, nothing otherwise. One finger moving alone
+/// shares nothing.
+fn common(from: [Point; 2], to: [Point; 2]) -> Point {
+    let (d1, d2) = (sub(to[0], from[0]), sub(to[1], from[1]));
+    let shared = |a: i32, b: i32| {
+        if a.signum() == b.signum() {
+            a.signum() * a.abs().min(b.abs())
+        } else {
+            0
+        }
+    };
+    (shared(d1.0, d2.0), shared(d1.1, d2.1))
 }
 
 fn sub(a: Point, b: Point) -> Point {
@@ -1729,26 +1806,26 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_goes_on_while_any_finger_touches_and_follows_the_last_one() {
+    fn a_drag_goes_on_while_any_finger_touches_and_a_moving_one_leads() {
         let (outs, _) = run(&[
             one(0, (100, 100)),
             Step::Timeout(300),
             f(310, &[Some((100, 100)), Some((300, 300))]), // a second finger lands
-            f(320, &[Some((100, 100)), Some((310, 300))]), // and leads
-            f(330, &[None, Some((315, 300))]),             // the first lifts
-            f(340, &[Some((120, 120)), Some((315, 300))]), // and lands again: leads
-            f(350, &[Some((125, 121)), Some((315, 300))]),
-            f(360, &[Some((126, 121)), None]), // the second lifts
-            lift(370),
+            f(320, &[Some((100, 100)), Some((350, 300))]), // and moves alone: it leads
+            f(330, &[None, Some((355, 300))]),             // the first lifts
+            f(340, &[None, Some((360, 301))]),
+            f(350, &[Some((120, 120)), Some((360, 301))]), // and lands again
+            f(360, &[Some((120, 120)), None]),             // the second lifts
+            f(370, &[Some((125, 120)), None]),
+            lift(380),
         ]);
         assert_eq!(keys(&outs), tapped(Hold));
         assert_eq!(
             axes(&outs),
             vec![
-                [(Axis::X, 10), (Axis::Y, 0)],
-                [(Axis::X, 5), (Axis::Y, 0)],
+                [(Axis::X, 50), (Axis::Y, 0)],
                 [(Axis::X, 5), (Axis::Y, 1)],
-                [(Axis::X, 1), (Axis::Y, 0)],
+                [(Axis::X, 5), (Axis::Y, 0)],
             ]
         );
     }
@@ -1777,15 +1854,84 @@ mod tests {
     }
 
     #[test]
-    fn nothing_else_happens_during_a_drag() {
-        let (outs, _) = run(&[
+    fn two_fingers_scroll_during_a_drag_with_its_button_held() {
+        let (outs, recognizer) = run(&[
             one(0, (100, 100)),
             Step::Timeout(300),
             two(310, (100, 100), (300, 300)),
-            two(320, (100, 160), (300, 360)), // would scroll
+            two(320, (100, 160), (300, 360)), // both move: a scroll, no zoom or swipe
+            two(330, (100, 170), (300, 370)),
+            one(340, (100, 175)), // back to one finger: no jump
+            one(350, (110, 175)),
         ]);
         assert_eq!(keys(&outs), vec![(Hold, true)]);
-        assert_eq!(axes(&outs), vec![[(Axis::X, 0), (Axis::Y, 60)]]);
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::H, 0), (Axis::V, 10)], [(Axis::X, 10), (Axis::Y, 0)]]
+        );
+        assert!(recognizer.drag.is_some());
+    }
+
+    #[test]
+    fn a_locked_drag_scrolls_with_two_fingers_and_goes_on_with_one() {
+        let (outs, recognizer) = run_with(
+            locked(300),
+            bound,
+            &[
+                one(0, (100, 100)),
+                lift(80),
+                one(150, (100, 100)),
+                one(160, (200, 100)), // dragging
+                lift(400),            // held by drag lock
+                two(500, (400, 500), (600, 500)),
+                two(510, (400, 530), (600, 530)),
+                two(520, (400, 540), (600, 540)), // scrolling, button still down
+                lift(530),                        // held again
+                one(600, (300, 300)),             // a finger: the cursor again
+                one(610, (320, 300)),
+            ],
+        );
+        assert_eq!(keys(&outs), vec![(Tap, true)]);
+        assert_eq!(
+            axes(&outs),
+            vec![
+                [(Axis::X, 100), (Axis::Y, 0)],
+                [(Axis::H, 0), (Axis::V, 10)],
+                [(Axis::X, 20), (Axis::Y, 0)],
+            ]
+        );
+        assert!(recognizer.drag.is_some_and(|d| d.lifted_ms.is_none()));
+    }
+
+    #[test]
+    fn one_finger_moving_beside_a_resting_one_moves_the_cursor() {
+        let (outs, recognizer) = run(&[
+            two(0, (300, 500), (600, 500)),
+            two(10, (300, 500), (600, 450)), // only the second moves: 50
+            two(20, (300, 501), (610, 440)),
+            f(30, &[None, Some((620, 430))]), // the resting one lifts: the mover goes on
+        ]);
+        assert!(keys(&outs).is_empty());
+        assert_eq!(
+            axes(&outs),
+            vec![
+                [(Axis::X, 0), (Axis::Y, -50)],
+                [(Axis::X, 10), (Axis::Y, -10)],
+                [(Axis::X, 10), (Axis::Y, -10)],
+            ]
+        );
+        assert!(matches!(recognizer.touch, Some(t) if !t.acted));
+    }
+
+    #[test]
+    fn a_scroll_follows_only_the_motion_both_fingers_share() {
+        let (outs, _) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(10, (400, 530), (600, 530)), // decided: a scroll
+            two(20, (400, 545), (600, 540)), // one went further: the shared 10 scrolls
+            two(30, (400, 560), (600, 540)), // one stopped: nothing
+        ]);
+        assert_eq!(axes(&outs), vec![[(Axis::H, 0), (Axis::V, 10)]]);
     }
 
     #[test]
@@ -1834,7 +1980,7 @@ mod tests {
     fn one_finger_still_is_not_a_zoom() {
         let (outs, recognizer) = run(&[two(0, (400, 500), (600, 500)), two(10, (400, 500), (650, 500))]);
         assert!(keys(&outs).is_empty());
-        assert!(!matches!(recognizer.two_finger, TwoFinger::Zooming { .. }));
+        assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { finger: 1, .. }));
     }
 
     #[test]
