@@ -1924,6 +1924,21 @@ mod tests {
     }
 
     #[test]
+    fn once_scrolling_one_finger_moving_alone_does_nothing() {
+        let (outs, recognizer) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(10, (400, 530), (600, 530)), // decided: a scroll
+            two(20, (400, 540), (600, 540)), // scrolls 10
+            two(30, (400, 600), (600, 540)), // only one moves: no scroll, no cursor
+            two(40, (450, 650), (600, 540)),
+            one(50, (460, 660)), // the other lifts: still no cursor
+            one(60, (480, 680)),
+        ]);
+        assert_eq!(axes(&outs), vec![[(Axis::H, 0), (Axis::V, 10)]]);
+        assert!(matches!(recognizer.two_finger, TwoFinger::Idle));
+    }
+
+    #[test]
     fn a_scroll_follows_only_the_motion_both_fingers_share() {
         let (outs, _) = run(&[
             two(0, (400, 500), (600, 500)),
