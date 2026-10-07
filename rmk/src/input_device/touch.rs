@@ -56,10 +56,16 @@ pub struct TouchGestureConfig {
     pub decide_percent: u8,
     /// A one-finger tap lifts within this many milliseconds of touching.
     pub tap_ms: u16,
+    /// A one-finger tap moves at most this far, in percent of the touchpad's longer
+    /// side; more is a cursor move.
+    pub tap_move_percent: u8,
     /// A one-finger touch starting within this many milliseconds of a tap lifting
     /// turns the tap into a drag, holding its action until the touch lifts. A tap
     /// clicks only once this has passed. 0 turns tap drags off, so taps click at once.
     pub tap_drag_ms: u16,
+    /// The touch after a tap only drags, or taps again, if it lands within this
+    /// distance of the tap, in percent of the touchpad's longer side.
+    pub tap_drag_distance_percent: u8,
     /// A two- or three-finger tap lifts every finger within this many milliseconds
     /// of the first touching.
     pub multi_finger_tap_ms: u16,
@@ -97,7 +103,9 @@ impl Default for TouchGestureConfig {
             scroll_both_axes: false,
             decide_percent: 4,
             tap_ms: 200,
+            tap_move_percent: 2,
             tap_drag_ms: 200,
+            tap_drag_distance_percent: 8,
             multi_finger_tap_ms: 300,
             hold_ms: 300,
             zoom_cos_permille: 906,
@@ -115,6 +123,8 @@ impl Default for TouchGestureConfig {
 struct Px {
     size: (u16, u16),
     decide: u32,
+    tap_move: u32,
+    tap_drag_distance: u32,
     zoom_step: u32,
     /// Swipe distances along X and along Y: two fingers side by side have far less
     /// room across a touchpad's short side than a share of its long side.
@@ -130,6 +140,8 @@ impl Px {
         Self {
             size,
             decide: percent_of(span, config.decide_percent),
+            tap_move: percent_of(span, config.tap_move_percent),
+            tap_drag_distance: percent_of(span, config.tap_drag_distance_percent),
             zoom_step: percent_of(span, config.zoom_step_percent).max(1),
             swipe: per_axis(config.swipe_percent),
             three_finger_swipe: per_axis(config.three_finger_swipe_percent),
@@ -217,8 +229,10 @@ struct Touch {
     max_fingers: u8,
     /// Where each slot's finger landed.
     landed: [Option<Point>; TOUCH_MAX_FINGERS],
-    /// A finger went further than a tap allows.
+    /// A finger went further than `decide`.
     moved: bool,
+    /// The furthest a finger went from where it landed.
+    travel: u32,
     /// Something other than a tap happened: a scroll, zoom, swipe or hold.
     acted: bool,
 }
@@ -242,6 +256,8 @@ struct PendingTaps {
     count: u8,
     /// When the last of them lifted.
     lifted_ms: u64,
+    /// Where the last of them touched.
+    at: Point,
     /// The one-finger touch that started within the window, until it is another tap
     /// or a drag: when it started, and its cursor motion, held back meanwhile.
     touch: Option<(u64, Point)>,
@@ -433,13 +449,20 @@ impl Recognizer {
         let taps = self.pending_taps?;
         match taps.touch {
             Some((started_ms, held)) => match frame.count {
-                // Lifted before it moved or rested: another tap.
+                // Lifted before it rested: another tap if it stayed put, a cursor move
+                // otherwise.
                 0 => {
-                    self.pending_taps = Some(PendingTaps {
-                        count: (taps.count + 1).min(MAX_PENDING_TAPS),
-                        lifted_ms: frame.at_ms,
-                        touch: None,
-                    });
+                    if len(held) <= self.px.tap_move {
+                        self.pending_taps = Some(PendingTaps {
+                            count: (taps.count + 1).min(MAX_PENDING_TAPS),
+                            lifted_ms: frame.at_ms,
+                            touch: None,
+                            ..taps
+                        });
+                    } else {
+                        self.flush_taps(out);
+                        out.cursor(held);
+                    }
                     self.reset();
                 }
                 1 => {
@@ -467,8 +490,13 @@ impl Recognizer {
             },
             None => {
                 let in_window = frame.at_ms.saturating_sub(taps.lifted_ms) <= u64::from(self.config.tap_drag_ms);
-                if frame.count == 1 && in_window {
+                let near = Drag::any_finger(frame).filter(|&(_, p)| len(sub(p, taps.at)) <= self.px.tap_drag_distance);
+                if frame.count == 1
+                    && in_window
+                    && let Some((_, landed)) = near
+                {
                     self.pending_taps = Some(PendingTaps {
+                        at: landed,
                         touch: Some((frame.at_ms, (0, 0))),
                         ..taps
                     });
@@ -557,7 +585,11 @@ impl Recognizer {
         for (landed, now) in touch.landed.iter_mut().zip(frame.slots) {
             match (*landed, now) {
                 (None, Some(now)) => *landed = Some(now),
-                (Some(start), Some(now)) if len(sub(now, start)) > self.px.decide => touch.moved = true,
+                (Some(start), Some(now)) => {
+                    let distance = len(sub(now, start));
+                    touch.travel = touch.travel.max(distance);
+                    touch.moved |= distance > self.px.decide;
+                }
                 _ => {}
             }
         }
@@ -610,6 +642,7 @@ impl Recognizer {
         }
         let elapsed = at_ms.saturating_sub(touch.started_ms);
         let (gesture, limit) = match touch.max_fingers {
+            1 if touch.travel > self.px.tap_move => return,
             1 => (TouchGesture::Tap, self.config.tap_ms),
             2 => (TouchGesture::TwoFingerTap, self.config.multi_finger_tap_ms),
             3 => (TouchGesture::ThreeFingerTap, self.config.multi_finger_tap_ms),
@@ -621,6 +654,7 @@ impl Recognizer {
                 self.pending_taps = Some(PendingTaps {
                     count: 1,
                     lifted_ms: at_ms,
+                    at: touch.landed.iter().flatten().next().copied().unwrap_or_default(),
                     touch: None,
                 });
             } else {
@@ -1175,10 +1209,45 @@ mod tests {
         let (outs, _) = run(&[
             one(0, (100, 100)),
             lift(80),
-            one(200, (100, 500)),
-            two(210, (100, 500), (300, 500)),
+            one(200, (100, 110)), // near the tap: might drag
+            two(210, (100, 110), (300, 110)),
         ]);
         assert_eq!(keys(&outs[3..4]), tapped(Tap));
+    }
+
+    #[test]
+    fn a_short_touch_that_moves_is_a_cursor_move_not_a_tap() {
+        // 30 is past the 20 a tap may move, though short of the 40 that decides gestures.
+        let (outs, _) = run(&[one(0, (100, 100)), one(20, (130, 100)), lift(60), Step::Timeout(500)]);
+        assert!(keys(&outs).is_empty());
+        assert_eq!(axes(&outs), vec![[(Axis::X, 30), (Axis::Y, 0)]]);
+    }
+
+    #[test]
+    fn a_touch_away_from_the_tap_clicks_and_moves_the_cursor() {
+        let (outs, recognizer) = run(&[
+            one(0, (100, 100)),
+            lift(80),
+            one(150, (300, 100)), // 200 away, past the 80 a tap drag allows
+            one(160, (310, 100)),
+        ]);
+        assert_eq!(keys(&outs[2..3]), tapped(Tap));
+        assert_eq!(axes(&outs), vec![[(Axis::X, 10), (Axis::Y, 0)]]);
+        assert!(recognizer.pending_taps.is_none() && recognizer.drag.is_none());
+    }
+
+    #[test]
+    fn a_quick_moving_touch_after_a_tap_clicks_once_and_moves() {
+        let (outs, _) = run(&[
+            one(0, (100, 100)),
+            lift(80),
+            one(150, (110, 100)),
+            one(160, (140, 100)), // 30: more than a tap moves, less than a drag needs
+            lift(200),
+            Step::Timeout(600),
+        ]);
+        assert_eq!(keys(&outs), tapped(Tap));
+        assert_eq!(axes(&outs), vec![[(Axis::X, 30), (Axis::Y, 0)]]);
     }
 
     #[test]

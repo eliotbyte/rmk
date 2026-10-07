@@ -1516,6 +1516,12 @@ pub struct TouchGesturesConfig {
     pub decide_percent: Option<u8>,
     /// A one-finger tap lifts within this many milliseconds. Defaults to 200.
     pub tap_ms: Option<u16>,
+    /// A one-finger tap moves at most this far, in percent of the touchpad's longer
+    /// side; more is a cursor move. Defaults to 2.
+    pub tap_move_percent: Option<u8>,
+    /// The touch after a tap only drags, or taps again, if it lands within this
+    /// distance of the tap, in percent of the touchpad's longer side. Defaults to 8.
+    pub tap_drag_distance_percent: Option<u8>,
     /// A one-finger touch starting within this many milliseconds of a tap turns the
     /// tap into a drag, holding its action until the touch lifts: tap, then touch and
     /// move drags. A tap clicks only once this has passed; 0 turns tap drags off, so
