@@ -368,9 +368,13 @@ enum TwoFinger {
     #[default]
     Idle,
     /// Two fingers down at `start` since `started_ms`, not moved far enough to tell.
+    /// While one of them rests, the other's motion already moves the cursor, from
+    /// `last`; `sent` is how much of each finger's motion went out that way.
     Deciding {
         start: [Point; 2],
         started_ms: u64,
+        last: [Point; 2],
+        sent: [Point; 2],
     },
     Scrolling {
         last: [Point; 2],
@@ -1004,8 +1008,15 @@ impl Recognizer {
             TwoFinger::Idle => TwoFinger::Deciding {
                 start: now,
                 started_ms: frame.at_ms,
+                last: now,
+                sent: [(0, 0); 2],
             },
-            TwoFinger::Deciding { start, started_ms } => match classify(start, now, &self.px, &self.config, zoom) {
+            TwoFinger::Deciding {
+                start,
+                started_ms,
+                last,
+                mut sent,
+            } => match classify(start, now, &self.px, &self.config, zoom) {
                 // Moving together: maybe a swipe if that way has one, a scroll otherwise.
                 Some(TwoFingerKind::Scroll) => {
                     let moved = average(start, now);
@@ -1031,9 +1042,12 @@ impl Recognizer {
                 Some(TwoFingerKind::Zoom) => TwoFinger::Zooming {
                     base: len(sub(start[1], start[0])),
                 },
-                // The held-back motion moves the cursor too.
+                // The rest of its motion moves the cursor too, as long as the other
+                // finger rested; otherwise it has been held back long and would jump.
                 Some(TwoFingerKind::Point(finger)) => {
-                    out.cursor(sub(now[finger], start[finger]));
+                    if len(sub(now[1 - finger], start[1 - finger])) < self.px.decide / 4 {
+                        out.cursor(sub(sub(now[finger], start[finger]), sent[finger]));
+                    }
                     TwoFinger::Pointing {
                         finger,
                         last: now[finger],
@@ -1041,7 +1055,26 @@ impl Recognizer {
                         from: start,
                     }
                 }
-                None => TwoFinger::Deciding { start, started_ms },
+                None => {
+                    // One finger resting while the other moves is most likely a cursor
+                    // move: follow it now, rather than send it all at once when told.
+                    let moved = [0, 1].map(|i| len(sub(now[i], start[i])));
+                    let mover = usize::from(moved[1] > moved[0]);
+                    if moved[1 - mover] < self.px.decide / 4
+                        && moved[mover] >= self.px.decide / 8
+                        && moved[mover] >= 2 * moved[1 - mover]
+                    {
+                        let step = sub(now[mover], last[mover]);
+                        out.cursor(step);
+                        sent[mover] = (sent[mover].0 + step.0, sent[mover].1 + step.1);
+                    }
+                    TwoFinger::Deciding {
+                        start,
+                        started_ms,
+                        last: now,
+                        sent,
+                    }
+                }
             },
             TwoFinger::Scrolling { last, axis } => {
                 scroll(common(last, now), axis, out);
@@ -2032,6 +2065,53 @@ mod tests {
             two(410, (300, 490), (500, 550)),
         ]);
         assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { .. }));
+    }
+
+    #[test]
+    fn a_second_finger_moving_beside_a_resting_one_moves_the_cursor_without_a_jump() {
+        // From a recording on a TPS43 (2048 tall): the first finger rests, the second
+        // sets off slowly. The cursor used to get all 108 at once when it was told.
+        let config = TouchGestureConfig::default();
+        let mut recognizer = Recognizer::new(config);
+        let bound = |_| true;
+        let frames = [
+            (89338, (926, 1299), (1627, 643)),
+            (89353, (926, 1297), (1627, 643)),
+            (89361, (925, 1295), (1627, 642)),
+            (89398, (925, 1295), (1626, 642)),
+            (89421, (925, 1294), (1625, 641)),
+            (89443, (925, 1294), (1625, 638)),
+            (89458, (925, 1294), (1624, 635)),
+            (89466, (925, 1294), (1622, 629)),
+            (89481, (925, 1294), (1619, 619)),
+            (89488, (925, 1294), (1617, 604)),
+            (89503, (925, 1294), (1615, 585)),
+            (89518, (925, 1294), (1614, 564)),
+            (89533, (925, 1295), (1615, 535)),
+            (89541, (924, 1296), (1616, 505)),
+            (89556, (924, 1297), (1616, 481)),
+        ];
+        let mut total = (0, 0);
+        for (at_ms, a, b) in frames {
+            let out = recognizer.frame(
+                &Frame {
+                    count: 2,
+                    slots: [Some(a), Some(b), None],
+                    strength: 800,
+                    at_ms,
+                },
+                (1792, 2048),
+                &bound,
+            );
+            if let Some([(Axis::X, x), (Axis::Y, y)]) = out.axes {
+                // The finger itself moves up to 30 a frame here.
+                assert!(y.abs() <= 40, "a {y} step at {at_ms}");
+                total = (total.0 + i32::from(x), total.1 + i32::from(y));
+            }
+        }
+        // All of the second finger's motion still reaches the cursor.
+        assert_eq!(total, (-11, -162));
+        assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { finger: 1, .. }));
     }
 
     #[test]
