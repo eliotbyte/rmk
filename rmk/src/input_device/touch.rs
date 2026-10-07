@@ -420,6 +420,10 @@ enum ThreeFinger {
 /// scroll: a scroll often starts with one finger, the second put down on the way.
 const SCROLL_JOIN_MS: u64 = 300;
 
+/// How long after a finger lands or lifts beside another the touchpad may still
+/// report one point between them, gliding there and back.
+const GLIDE_MS: u64 = 50;
+
 /// The directions of swipes on the touchpad, before the cursor transforms.
 const DIRECTIONS: [Point; 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 
@@ -443,6 +447,10 @@ struct Recognizer {
     /// scrolled, for inertia.
     scroll_velocity: Point,
     scrolled_ms: u64,
+    /// How far each slot's glides moved it off its finger, taken off its position
+    /// until the finger lifts; and when the number of fingers last changed.
+    glide: [Point; TOUCH_MAX_FINGERS],
+    count_changed_ms: Option<u64>,
     two_finger: TwoFinger,
     three_finger: ThreeFinger,
 }
@@ -461,9 +469,41 @@ impl Recognizer {
             previous_ms: 0,
             scroll_velocity: (0, 0),
             scrolled_ms: 0,
+            glide: [(0, 0); TOUCH_MAX_FINGERS],
+            count_changed_ms: None,
             two_finger: TwoFinger::Idle,
             three_finger: ThreeFinger::Idle,
         }
+    }
+
+    /// `frame` without the touchpad's glides. Right after a finger lands or lifts
+    /// beside another, the touchpad reports one point between the two for a few
+    /// frames, which glides there and back. No finger moves that far that soon, so a
+    /// step longer than `decide` then is a glide, not motion.
+    fn unglide(&mut self, mut frame: Frame) -> Frame {
+        let counts = [frame.slots, self.previous].map(|slots| slots.iter().flatten().count());
+        if counts[0] != counts[1] && counts[0].min(counts[1]) >= 1 {
+            self.count_changed_ms = Some(frame.at_ms);
+        }
+        let gliding = self
+            .count_changed_ms
+            .is_some_and(|changed_ms| frame.at_ms.saturating_sub(changed_ms) <= GLIDE_MS);
+        for ((slot, glide), last) in frame.slots.iter_mut().zip(&mut self.glide).zip(self.previous) {
+            let Some(now) = slot else {
+                *glide = (0, 0);
+                continue;
+            };
+            *now = sub(*now, *glide);
+            if let Some(last) = last
+                && gliding
+                && len(sub(*now, last)) > self.px.decide
+            {
+                let step = sub(*now, last);
+                *glide = (glide.0 + step.0, glide.1 + step.1);
+                *now = last;
+            }
+        }
+        frame
     }
 
     /// The gesture a swipe along `dir` on the touchpad makes, as the cursor moves.
@@ -701,6 +741,7 @@ impl Recognizer {
         if self.px.size != size {
             self.px = Px::new(&self.config, size);
         }
+        let frame = &self.unglide(*frame);
         let mut out = Output::default();
         let previous = self.previous;
         self.previous = frame.slots;
@@ -1887,13 +1928,13 @@ mod tests {
             one(0, (100, 100)),
             Step::Timeout(300),
             f(310, &[Some((100, 100)), Some((300, 300))]), // a second finger lands
-            f(320, &[Some((100, 100)), Some((350, 300))]), // and moves alone: it leads
-            f(330, &[None, Some((355, 300))]),             // the first lifts
-            f(340, &[None, Some((360, 301))]),
-            f(350, &[Some((120, 120)), Some((360, 301))]), // and lands again
-            f(360, &[Some((120, 120)), None]),             // the second lifts
-            f(370, &[Some((125, 120)), None]),
-            lift(380),
+            f(370, &[Some((100, 100)), Some((350, 300))]), // and moves alone: it leads
+            f(380, &[None, Some((355, 300))]),             // the first lifts
+            f(390, &[None, Some((360, 301))]),
+            f(400, &[Some((120, 120)), Some((360, 301))]), // and lands again
+            f(410, &[Some((120, 120)), None]),             // the second lifts
+            f(420, &[Some((125, 120)), None]),
+            lift(430),
         ]);
         assert_eq!(keys(&outs), tapped(Hold));
         assert_eq!(
@@ -1935,10 +1976,10 @@ mod tests {
             one(0, (100, 100)),
             Step::Timeout(300),
             two(310, (100, 100), (300, 300)),
-            two(320, (100, 160), (300, 360)), // both move: a scroll, no zoom or swipe
-            two(330, (100, 170), (300, 370)),
-            one(340, (100, 175)), // back to one finger: no jump
-            one(350, (110, 175)),
+            two(370, (100, 160), (300, 360)), // both move: a scroll, no zoom or swipe
+            two(380, (100, 170), (300, 370)),
+            one(390, (100, 175)), // back to one finger: no jump
+            one(400, (110, 175)),
         ]);
         assert_eq!(keys(&outs), vec![(Hold, true)]);
         assert_eq!(
@@ -2112,6 +2153,61 @@ mod tests {
         // All of the second finger's motion still reaches the cursor.
         assert_eq!(total, (-11, -162));
         assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { finger: 1, .. }));
+    }
+
+    #[test]
+    fn the_point_gliding_between_two_fingers_as_one_lands_or_lifts_is_no_cursor_motion() {
+        // From a recording on a TPS43 (2048 tall): one finger rests, a second one
+        // lifts, lands again and lifts. Each time the touchpad's one point glided
+        // about 150 a frame toward the other finger and back, and the cursor with it;
+        // the last time without the finger count changing on the way back.
+        let mut recognizer = Recognizer::new(TouchGestureConfig::default());
+        let frames = [
+            (289791, Some((1155, 694)), None),
+            (289828, Some((1155, 695)), None),
+            (289851, Some((1155, 695)), Some((530, 1167))),
+            (289858, Some((1018, 800)), None),
+            (289873, Some((880, 905)), None),
+            (289881, Some((879, 905)), None),
+            (289896, Some((877, 906)), None),
+            (289911, Some((1006, 813)), Some((529, 1170))),
+            (289926, Some((1136, 720)), Some((529, 1170))),
+            (289934, Some((1136, 720)), Some((528, 1172))),
+            (289956, Some((1137, 720)), Some((527, 1174))),
+            (289994, Some((1138, 719)), Some((524, 1179))),
+            (291899, Some((1164, 689)), Some((563, 1265))),
+            (291913, Some((1040, 776)), None),
+            (291928, Some((922, 859)), None),
+            (291936, Some((1036, 763)), None),
+            (291943, Some((1144, 672)), None),
+            (291958, Some((1144, 671)), None),
+        ];
+        let mut steps = Vec::new();
+        for (at_ms, a, b) in frames {
+            let out = recognizer.frame(
+                &Frame {
+                    count: [a, b].iter().flatten().count() as u8,
+                    slots: [a, b, None],
+                    strength: 1500,
+                    at_ms,
+                },
+                (1792, 2048),
+                &|_| true,
+            );
+            if let Some([(Axis::X, x), (Axis::Y, y)]) = out.axes {
+                steps.push((x, y));
+            }
+        }
+        assert!(steps.iter().all(|&(x, y)| x.abs() + y.abs() < 40), "{steps:?}");
+    }
+
+    #[test]
+    fn a_fast_move_long_after_fingers_change_is_cursor_motion() {
+        let (outs, _) = run(&[one(0, (100, 100)), one(100, (200, 100)), one(110, (300, 100))]);
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::X, 100), (Axis::Y, 0)], [(Axis::X, 100), (Axis::Y, 0)]]
+        );
     }
 
     #[test]
