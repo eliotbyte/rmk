@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use rmk_config::resolved::hardware::{ChipModel, ChipSeries, Iqs5xxConfig};
 use rmk_config::TouchGesturesConfig;
+use rmk_config::resolved::hardware::{ChipModel, ChipSeries, Iqs5xxConfig};
 
 use super::{Initializer, expand_pointing_acceleration};
 

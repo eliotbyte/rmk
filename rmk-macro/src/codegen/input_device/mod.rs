@@ -262,7 +262,9 @@ pub(crate) fn expand_input_device_config(
     // generate IQS5xx configuration. Touch map indices go to the central's (or
     // unibody's) trackpads with gestures first, then each peripheral's.
     let central_iqs5xx = match board {
-        BoardConfig::UniBody(UniBodyConfig { input_device, .. }) => input_device.clone().iqs5xx.unwrap_or(Vec::new()),
+        BoardConfig::UniBody(UniBodyConfig { input_device, .. }) => {
+            input_device.clone().iqs5xx.unwrap_or(Vec::new())
+        }
         BoardConfig::Split(split_config) => split_config
             .central
             .input_device

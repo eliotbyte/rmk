@@ -1,6 +1,6 @@
 use quote::quote;
-use rmk_config::resolved::{Host, Identity, Keymap};
 use rmk_config::KeyboardTomlConfig;
+use rmk_config::resolved::{Host, Identity, Keymap};
 
 pub(crate) fn read_keyboard_toml_config() -> KeyboardTomlConfig {
     // Get the path of the keyboard config file from the environment variable

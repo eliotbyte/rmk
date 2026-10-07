@@ -3,9 +3,9 @@ use std::collections::HashMap;
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use rmk_config::TouchActionsConfig;
 use rmk_config::resolved::behavior::MorseProfile;
 use rmk_config::resolved::{Behavior, Keymap};
-use rmk_config::TouchActionsConfig;
 
 use super::action_parser::parse_key;
 
