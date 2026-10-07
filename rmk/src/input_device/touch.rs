@@ -380,13 +380,13 @@ enum TwoFinger {
         last: [Point; 2],
         axis: ScrollAxis,
     },
-    /// Only one of the two fingers moves: it moves the cursor, from `last`. Until
-    /// `JOIN_MS` after the second finger landed at `started_ms`, the other setting
-    /// off from `from` still makes it a scroll if it follows, or a zoom if it goes the
-    /// other way along the line between them.
+    /// Only one of the two fingers moves: it moves the cursor. `last` is where both
+    /// were on the last frame. Until `JOIN_MS` after the second finger landed at
+    /// `started_ms`, the other setting off from `from` still makes it a scroll if it
+    /// follows, or a zoom if it goes the other way along the line between them.
     Pointing {
         finger: usize,
-        last: Point,
+        last: [Point; 2],
         started_ms: u64,
         from: [Point; 2],
     },
@@ -1092,7 +1092,7 @@ impl Recognizer {
                     }
                     TwoFinger::Pointing {
                         finger,
-                        last: now[finger],
+                        last: now,
                         started_ms,
                         from: start,
                     }
@@ -1144,6 +1144,8 @@ impl Recognizer {
                 } else if zoom
                     && frame.at_ms.saturating_sub(started_ms) <= JOIN_MS
                     && len(joined) >= self.px.decide / 2
+                    // Not a resting finger drifting while the other moves.
+                    && len(sub(now[other], last[other])) * 3 > len(sub(now[finger], last[finger]))
                     && [false, true].into_iter().any(|pinch| {
                         // Spreading, the other finger moves on away from the moving one,
                         // and the moving one away from it; pinching, the other way.
@@ -1155,10 +1157,10 @@ impl Recognizer {
                         base: len(sub(now[1], now[0])),
                     }
                 } else {
-                    out.cursor(sub(now[finger], last));
+                    out.cursor(sub(now[finger], last[finger]));
                     TwoFinger::Pointing {
                         finger,
-                        last: now[finger],
+                        last: now,
                         started_ms,
                         from,
                     }
@@ -1239,28 +1241,27 @@ fn classify(
 ) -> Option<TwoFingerKind> {
     let d1 = sub(now[0], start[0]);
     let d2 = sub(now[1], start[1]);
-    let travel = len(d1) + len(d2);
+    let (l1, l2) = (len(d1), len(d2));
+    let travel = l1 + l2;
     if travel < px.decide {
         return None;
     }
+    let (slow, fast) = (l1.min(l2), l1.max(l2));
+    let faster = usize::from(l2 > l1);
+    // Both moving, neither more than three times as fast: a finger resting while the
+    // other moves drifts a little, and that's no gesture of two fingers.
+    let both_move = slow >= px.decide / 4 && slow * 3 >= fast;
     // Fingers spreading or pinching move along arcs, so it is their motion together
     // that has to change the distance between them: by as much as moving within the
     // angle along the line between them would.
     let axis = sub(start[1], start[0]);
     let spread = (dot(d2, axis) - dot(d1, axis)) / i64::from(len(axis).max(1));
     let cos = u64::from(config.zoom_cos_permille.min(1000));
-    if zoom
-        && len(d1) >= px.decide / 4
-        && len(d2) >= px.decide / 4
-        && spread.unsigned_abs() * 1000 >= u64::from(travel) * cos
-    {
+    if zoom && both_move && spread.unsigned_abs() * 1000 >= u64::from(travel) * cos {
         return Some(TwoFingerKind::Zoom);
     }
-    let (l1, l2) = (len(d1), len(d2));
-    let (slow, fast) = (l1.min(l2), l1.max(l2));
-    let faster = usize::from(l2 > l1);
-    // Both moving within 45° of each other, neither more than three times as fast.
-    if slow >= px.decide / 4 && slow * 3 >= fast && within_angle(d1, d2, 707, false) {
+    // Both moving within 45° of each other.
+    if both_move && within_angle(d1, d2, 707, false) {
         return Some(TwoFingerKind::Scroll);
     }
     // One finger moving while the other stays put; failing anything else, the faster
@@ -2328,6 +2329,18 @@ mod tests {
             (1035831, Some((1698, 694)), Some((468, 1855))),
         ]);
         assert_eq!(keys(&outs), tapped(ZoomIn));
+    }
+
+    #[test]
+    fn a_finger_moving_away_from_a_drifting_one_is_no_zoom() {
+        // As recorded on a TPS43: one finger rests but drifts slowly away, while the
+        // other moves away from it ten times as fast.
+        let steps: Vec<_> = (0..=10)
+            .map(|i| two(i * 10, (400 - 2 * i as i32, 500), (600 + 20 * i as i32, 500)))
+            .collect();
+        let (outs, recognizer) = run(&steps);
+        assert!(keys(&outs).is_empty());
+        assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { finger: 1, .. }));
     }
 
     #[test]
