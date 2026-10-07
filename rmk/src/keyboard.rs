@@ -2021,6 +2021,61 @@ mod test {
     }
 
     #[test]
+    fn touch_gesture_runs_its_action_on_the_active_layer() {
+        use rmk_types::action::{TouchAction, TouchGesture};
+
+        use crate::event::TouchPos;
+
+        let main = async {
+            let touch_map = [
+                [TouchAction::new().with(TouchGesture::Tap, k!(B))],
+                [TouchAction::new().with(TouchGesture::Tap, k!(C))],
+            ];
+            let behavior_config: &'static mut BehaviorConfig = Box::leak(Box::new(BehaviorConfig::default()));
+            let _ = behavior_config.morse.profiles.push(MorseProfile::new(
+                Some(true),
+                Some(MorseMode::PermissiveHold),
+                None,
+                None,
+            ));
+            let per_key_config: &'static PositionalConfig<5, 14> = Box::leak(Box::new(PositionalConfig::default()));
+            let data = Box::leak(Box::new(crate::keymap::KeymapData::new_with_touch(
+                get_keymap(),
+                [[], []],
+                touch_map,
+            )));
+            let keymap = Box::leak(Box::new(block_on(KeyMap::new(data, behavior_config, per_key_config))));
+            let mut keyboard = Keyboard::new(keymap);
+            let tap = |pressed| KeyboardEvent {
+                pressed,
+                pos: KeyboardEventPos::Touch(TouchPos {
+                    id: 0,
+                    gesture: TouchGesture::Tap,
+                }),
+            };
+
+            keyboard.process_inner(tap(true)).await;
+            assert_eq!(keyboard.held_keycodes()[0], HidKeyCode::B);
+            keyboard.process_inner(tap(false)).await;
+            assert_eq!(keyboard.held_keycodes()[0], HidKeyCode::No);
+
+            // A tap started on layer 0 releases its layer 0 action after layer 1 turns on.
+            keyboard.process_inner(tap(true)).await;
+            keyboard.process_inner(KeyboardEvent::key(4, 9, true)).await;
+            keyboard.process_inner(tap(false)).await;
+            assert_eq!(keyboard.held_keycodes()[0], HidKeyCode::No);
+
+            // With layer 1 on, the tap runs layer 1's action.
+            keyboard.process_inner(tap(true)).await;
+            assert_eq!(keyboard.held_keycodes()[0], HidKeyCode::C);
+            keyboard.process_inner(tap(false)).await;
+            keyboard.process_inner(KeyboardEvent::key(4, 9, false)).await;
+            assert_eq!(keyboard.held_keycodes()[0], HidKeyCode::No);
+        };
+        block_on(main);
+    }
+
+    #[test]
     fn test_register_key() {
         let main = async {
             let mut keyboard = create_test_keyboard();

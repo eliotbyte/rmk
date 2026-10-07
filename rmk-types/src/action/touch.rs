@@ -1,0 +1,109 @@
+//! Touchpad gesture actions.
+
+use postcard::experimental::max_size::MaxSize;
+use serde::{Deserialize, Serialize};
+
+use super::KeyAction;
+
+/// A gesture a touchpad recognizes. Each has its own action per layer in the touch
+/// map. Directions are the cursor's: a swipe left moves the fingers the way that
+/// moves the cursor left.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MaxSize)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+pub enum TouchGesture {
+    /// One finger touching and lifting without moving.
+    Tap,
+    TwoFingerTap,
+    ThreeFingerTap,
+    /// One finger held still: pressed until every finger lifts, so the fingers can
+    /// drag meanwhile.
+    Hold,
+    /// Two fingers moving apart, once per zoom step.
+    ZoomIn,
+    /// Two fingers moving together, once per zoom step.
+    ZoomOut,
+    TwoFingerSwipeLeft,
+    TwoFingerSwipeRight,
+    TwoFingerSwipeUp,
+    TwoFingerSwipeDown,
+    ThreeFingerSwipeLeft,
+    ThreeFingerSwipeRight,
+    ThreeFingerSwipeUp,
+    ThreeFingerSwipeDown,
+}
+
+impl TouchGesture {
+    /// How many gestures there are.
+    pub const COUNT: usize = 14;
+
+    /// Every gesture, in the order of [`TouchAction::actions`].
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Tap,
+        Self::TwoFingerTap,
+        Self::ThreeFingerTap,
+        Self::Hold,
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::TwoFingerSwipeLeft,
+        Self::TwoFingerSwipeRight,
+        Self::TwoFingerSwipeUp,
+        Self::TwoFingerSwipeDown,
+        Self::ThreeFingerSwipeLeft,
+        Self::ThreeFingerSwipeRight,
+        Self::ThreeFingerSwipeUp,
+        Self::ThreeFingerSwipeDown,
+    ];
+}
+
+/// The actions of a touchpad's gestures, stored in the touch map.
+///
+/// Every gesture defaults to `KeyAction::No` (no action).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MaxSize)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+pub struct TouchAction {
+    /// Each gesture's action, indexed by `TouchGesture as usize`.
+    pub actions: [KeyAction; TouchGesture::COUNT],
+}
+
+impl Default for TouchAction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TouchAction {
+    /// No action for any gesture.
+    pub const fn new() -> Self {
+        Self {
+            actions: [KeyAction::No; TouchGesture::COUNT],
+        }
+    }
+
+    /// `self` with `gesture` triggering `action`.
+    pub const fn with(mut self, gesture: TouchGesture, action: KeyAction) -> Self {
+        self.actions[gesture as usize] = action;
+        self
+    }
+
+    pub const fn get(&self, gesture: TouchGesture) -> KeyAction {
+        self.actions[gesture as usize]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_lists_every_gesture_at_its_index() {
+        for (i, gesture) in TouchGesture::ALL.iter().enumerate() {
+            assert_eq!(*gesture as usize, i);
+        }
+        assert_eq!(TouchGesture::ThreeFingerSwipeDown as usize + 1, TouchGesture::COUNT);
+    }
+}
