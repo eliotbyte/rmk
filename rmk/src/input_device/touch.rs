@@ -376,10 +376,14 @@ enum TwoFinger {
         last: [Point; 2],
         axis: ScrollAxis,
     },
-    /// Only one of the two fingers moves: it moves the cursor, from `last`.
+    /// Only one of the two fingers moves: it moves the cursor, from `last`. Until
+    /// `SCROLL_JOIN_MS` after the second finger landed at `started_ms`, the other
+    /// following it from `from` still makes it a scroll.
     Pointing {
         finger: usize,
         last: Point,
+        started_ms: u64,
+        from: [Point; 2],
     },
     /// Zooming; `base` is the finger distance at the last zoom step.
     Zooming {
@@ -407,6 +411,10 @@ enum ThreeFinger {
     /// A three-finger swipe fired; nothing more until the fingers lift.
     Swiped,
 }
+
+/// How long after a second finger lands it can still join the moving one for a
+/// scroll: a scroll often starts with one finger, the second put down on the way.
+const SCROLL_JOIN_MS: u64 = 300;
 
 /// The directions of swipes on the touchpad, before the cursor transforms.
 const DIRECTIONS: [Point; 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
@@ -1029,6 +1037,8 @@ impl Recognizer {
                     TwoFinger::Pointing {
                         finger,
                         last: now[finger],
+                        started_ms,
+                        from: start,
                     }
                 }
                 None => TwoFinger::Deciding { start, started_ms },
@@ -1037,11 +1047,33 @@ impl Recognizer {
                 scroll(common(last, now), axis, out);
                 TwoFinger::Scrolling { last: now, axis }
             }
-            TwoFinger::Pointing { finger, last } => {
-                out.cursor(sub(now[finger], last));
-                TwoFinger::Pointing {
-                    finger,
-                    last: now[finger],
+            TwoFinger::Pointing {
+                finger,
+                last,
+                started_ms,
+                from,
+            } => {
+                let other = 1 - finger;
+                let (moved, joined) = (sub(now[finger], from[finger]), sub(now[other], from[other]));
+                // The other finger set off the same way soon after landing: a scroll that
+                // started with one finger.
+                if self.config.scroll
+                    && frame.at_ms.saturating_sub(started_ms) <= SCROLL_JOIN_MS
+                    && len(joined) >= self.px.decide
+                    && within_angle(moved, joined, 707, false)
+                {
+                    TwoFinger::Scrolling {
+                        last: now,
+                        axis: scroll_axis(joined),
+                    }
+                } else {
+                    out.cursor(sub(now[finger], last));
+                    TwoFinger::Pointing {
+                        finger,
+                        last: now[finger],
+                        started_ms,
+                        from,
+                    }
                 }
             }
             TwoFinger::Flicking {
@@ -1966,6 +1998,40 @@ mod tests {
             vec![[(Axis::H, 0), (Axis::V, 10)], [(Axis::H, 0), (Axis::V, 10)]]
         );
         assert!(matches!(recognizer.two_finger, TwoFinger::Scrolling { .. }));
+    }
+
+    #[test]
+    fn a_scroll_can_start_with_one_finger_and_the_second_joining() {
+        let (outs, recognizer) = run(&[
+            one(0, (300, 600)),
+            one(10, (300, 580)),             // moving up alone: the cursor
+            two(20, (300, 560), (500, 600)), // a second finger lands, still at first
+            two(30, (300, 540), (500, 600)),
+            two(40, (300, 520), (500, 600)), // only the first has moved: the cursor
+            two(60, (300, 500), (500, 570)),
+            two(80, (300, 480), (500, 540)), // the second follows: a vertical scroll
+            two(90, (300, 470), (500, 530)),
+        ]);
+        assert!(matches!(
+            recognizer.two_finger,
+            TwoFinger::Scrolling {
+                axis: ScrollAxis::Vertical,
+                ..
+            }
+        ));
+        assert_eq!(axes(&outs).last(), Some(&[(Axis::H, 0), (Axis::V, -10)]));
+    }
+
+    #[test]
+    fn a_resting_finger_moving_late_doesnt_turn_a_cursor_move_into_a_scroll() {
+        let (_, recognizer) = run(&[
+            two(0, (300, 600), (500, 600)),
+            two(10, (300, 570), (500, 600)),
+            two(20, (300, 540), (500, 600)),  // the first moves the cursor
+            two(400, (300, 500), (500, 560)), // the second moves too, but much later
+            two(410, (300, 490), (500, 550)),
+        ]);
+        assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { .. }));
     }
 
     #[test]
