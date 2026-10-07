@@ -808,8 +808,11 @@ impl Recognizer {
         }
 
         match frame.count {
+            // A scroll pauses while one of its fingers is lifted, to go on when it is
+            // put back.
+            1 if matches!(self.two_finger, TwoFinger::Scrolling { .. }) => {}
             1 => {
-                // Leaving two fingers may end a flick, or start inertia.
+                // Leaving two fingers may end a flick.
                 self.end_two_fingers(frame.at_ms, &mut out);
                 // The finger left over from a scroll or zoom doesn't move the cursor.
                 let after_two_fingers = self.touch.is_some_and(|t| t.max_fingers >= 2 && t.acted);
@@ -828,6 +831,14 @@ impl Recognizer {
                 if !matches!(self.two_finger, TwoFinger::Scrolling { .. }) {
                     self.scrolled_ms = previous_ms;
                     self.scroll_velocity = (0, 0);
+                }
+                // The finger put back on a paused scroll lands anywhere: go on from here.
+                if let TwoFinger::Scrolling { axis, .. } = self.two_finger
+                    && previous.iter().flatten().count() < 2
+                    && let Some(now) = frame.first::<2>()
+                {
+                    self.two_finger = TwoFinger::Scrolling { last: now, axis };
+                    return out;
                 }
                 self.two_fingers(frame, bound, &mut out);
                 if let Some([(Axis::H, h), (Axis::V, v)]) = out.axes {
@@ -1935,7 +1946,26 @@ mod tests {
             one(60, (480, 680)),
         ]);
         assert_eq!(axes(&outs), vec![[(Axis::H, 0), (Axis::V, 10)]]);
-        assert!(matches!(recognizer.two_finger, TwoFinger::Idle));
+        // Paused until a finger is back or both lift.
+        assert!(matches!(recognizer.two_finger, TwoFinger::Scrolling { .. }));
+    }
+
+    #[test]
+    fn a_scroll_pauses_while_a_finger_is_lifted_and_goes_on_when_it_is_back() {
+        let (outs, recognizer) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(10, (400, 530), (600, 530)), // decided: a scroll
+            two(20, (400, 540), (600, 540)), // scrolls 10
+            one(30, (400, 550)),             // one lifts: paused, no cursor
+            one(40, (400, 560)),
+            two(200, (400, 560), (700, 400)), // back, elsewhere: no jump
+            two(210, (400, 570), (700, 410)), // scrolls on at once
+        ]);
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::H, 0), (Axis::V, 10)], [(Axis::H, 0), (Axis::V, 10)]]
+        );
+        assert!(matches!(recognizer.two_finger, TwoFinger::Scrolling { .. }));
     }
 
     #[test]
