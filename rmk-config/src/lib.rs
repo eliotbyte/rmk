@@ -1516,6 +1516,10 @@ pub struct TouchGesturesConfig {
     pub decide_percent: Option<u8>,
     /// A one-finger tap lifts within this many milliseconds. Defaults to 200.
     pub tap_ms: Option<u16>,
+    /// A one-finger touch starting within this many milliseconds of a tap holds the
+    /// tap's action until it lifts: tap, then touch and move drags. 0 turns it off.
+    /// Defaults to 250.
+    pub tap_drag_ms: Option<u16>,
     /// A two- or three-finger tap lifts within this many milliseconds. Defaults to 300.
     pub multi_finger_tap_ms: Option<u16>,
     /// One finger held still this many milliseconds is a hold. Defaults to 300.
