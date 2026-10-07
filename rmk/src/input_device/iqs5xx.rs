@@ -394,6 +394,7 @@ where
             (data[at + 4] != 0 || data[at + 5] != 0).then(|| TouchPoint {
                 x: u16::from_be_bytes([data[at], data[at + 1]]),
                 y: u16::from_be_bytes([data[at + 2], data[at + 3]]),
+                strength: u16::from_be_bytes([data[at + 4], data[at + 5]]),
             })
         });
 

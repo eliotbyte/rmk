@@ -77,6 +77,9 @@ name = "trackpad0"
 # scroll_both_axes = false  # off: a scroll keeps to the axis it started along
 # tap_ms = 180              # a one-finger tap lifts within this time
 # tap_move_percent = 3      # and moves at most this far (in % of the trackpad); more is a cursor move
+# tap_min_ms = 0            # a tap lasts at least this long; shorter is a graze, e.g. 20
+# tap_min_strength_percent = 0 # a tap touches at least this strongly, in % of how firmly the
+#                           # cursor is usually moved (learned as it moves); lighter is a graze, e.g. 50
 # tap_drag_ms = 180         # a touch starting this soon after a tap drags; a tap clicks
 #                           # once this has passed. 0 turns tap drags off, so taps click at once
 # tap_drag_distance_percent = 8 # and only if it lands this close to the tap

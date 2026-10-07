@@ -214,6 +214,9 @@ pub struct TouchEvent {
 pub struct TouchPoint {
     pub x: u16,
     pub y: u16,
+    /// How strongly the finger touches, in the touchpad's own units: a firmer or
+    /// larger contact is stronger. 0 if the touchpad doesn't tell.
+    pub strength: u16,
 }
 
 /// Set the CPI (Resolution) of the pointing device

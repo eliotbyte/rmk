@@ -207,6 +207,8 @@ fn expand_touch_gesture_config(
     let tap_ms = gestures.tap_ms.unwrap_or(180);
     let tap_drag_ms = gestures.tap_drag_ms.unwrap_or(180);
     let tap_move_percent = gestures.tap_move_percent.unwrap_or(3);
+    let tap_min_ms = gestures.tap_min_ms.unwrap_or(0);
+    let tap_min_strength_percent = gestures.tap_min_strength_percent.unwrap_or(0);
     let tap_drag_distance_percent = gestures.tap_drag_distance_percent.unwrap_or(8);
     let multi_finger_tap_ms = gestures.multi_finger_tap_ms.unwrap_or(300);
     let hold_ms = gestures.hold_ms.unwrap_or(300);
@@ -231,6 +233,8 @@ fn expand_touch_gesture_config(
             tap_ms: #tap_ms,
             tap_drag_ms: #tap_drag_ms,
             tap_move_percent: #tap_move_percent,
+            tap_min_ms: #tap_min_ms,
+            tap_min_strength_percent: #tap_min_strength_percent,
             tap_drag_distance_percent: #tap_drag_distance_percent,
             multi_finger_tap_ms: #multi_finger_tap_ms,
             hold_ms: #hold_ms,

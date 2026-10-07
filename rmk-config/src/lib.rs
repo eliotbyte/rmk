@@ -1521,6 +1521,13 @@ pub struct TouchGesturesConfig {
     /// side; more is a cursor move, or a drag on the touch after a tap. Defaults to 3,
     /// about libinput's 1.3 mm on a 43 mm trackpad.
     pub tap_move_percent: Option<u8>,
+    /// A tap lasts at least this many milliseconds; a shorter touch is a graze. Off
+    /// (0) by default.
+    pub tap_min_ms: Option<u16>,
+    /// A tap touches at least this strongly, in percent of how strongly the cursor is
+    /// usually moved (learned as it moves); a lighter touch is a graze. Off (0) by
+    /// default.
+    pub tap_min_strength_percent: Option<u8>,
     /// The touch after a tap only drags, or taps again, if it lands within this
     /// distance of the tap, in percent of the touchpad's longer side. Defaults to 8.
     pub tap_drag_distance_percent: Option<u8>,

@@ -63,6 +63,12 @@ pub struct TouchGestureConfig {
     /// A one-finger tap moves at most this far, in percent of the touchpad's longer
     /// side; more is a cursor move.
     pub tap_move_percent: u8,
+    /// A tap lasts at least this many milliseconds; a shorter touch is a graze.
+    pub tap_min_ms: u16,
+    /// A tap touches at least this strongly, in percent of how strongly the cursor is
+    /// usually moved, which is learned as it moves; a lighter touch is a graze. 0 turns
+    /// this off, as does a touchpad that doesn't report strength.
+    pub tap_min_strength_percent: u8,
     /// A one-finger touch starting within this many milliseconds of a tap lifting
     /// turns the tap into a drag, holding its action until the touch lifts. A tap
     /// clicks only once this has passed. 0 turns tap drags off, so taps click at once.
@@ -115,6 +121,8 @@ impl Default for TouchGestureConfig {
             decide_percent: 4,
             tap_ms: 180,
             tap_move_percent: 3,
+            tap_min_ms: 0,
+            tap_min_strength_percent: 0,
             tap_drag_ms: 180,
             tap_drag_distance_percent: 8,
             multi_finger_tap_ms: 300,
@@ -178,6 +186,8 @@ struct Frame {
     count: u8,
     /// Finger positions by slot.
     slots: [Option<Point>; TOUCH_MAX_FINGERS],
+    /// The strongest finger's strength.
+    strength: u16,
     at_ms: u64,
 }
 
@@ -186,6 +196,7 @@ impl Frame {
         Self {
             count: event.count,
             slots: event.fingers.map(|f| f.map(|p| (i32::from(p.x), i32::from(p.y)))),
+            strength: event.fingers.iter().flatten().map(|p| p.strength).max().unwrap_or(0),
             at_ms,
         }
     }
@@ -246,6 +257,8 @@ struct Touch {
     moved: bool,
     /// The furthest a finger went from where it landed.
     travel: u32,
+    /// The strongest it touched.
+    peak_strength: u16,
     /// Something other than a tap happened: a scroll, zoom, swipe or hold.
     acted: bool,
 }
@@ -306,8 +319,9 @@ struct PendingTaps {
     /// Where the last of them touched.
     at: Point,
     /// The one-finger touch that started within the window, until it is another tap
-    /// or a drag: when it started, and its cursor motion, held back meanwhile.
-    touch: Option<(u64, Point)>,
+    /// or a drag: when it started, its cursor motion, held back meanwhile, and how
+    /// strongly it touched.
+    touch: Option<(u64, Point, u16)>,
 }
 
 impl Drag {
@@ -403,6 +417,9 @@ struct Recognizer {
     drag: Option<Drag>,
     pending_taps: Option<PendingTaps>,
     inertia: Option<Inertia>,
+    /// How strongly one finger usually touches while moving the cursor, averaged;
+    /// 0 until it is known.
+    typical_strength: u32,
     /// When the last frame came.
     previous_ms: u64,
     /// The two-finger scroll's speed in touchpad units per second, and when it last
@@ -423,6 +440,7 @@ impl Recognizer {
             drag: None,
             pending_taps: None,
             inertia: None,
+            typical_strength: 0,
             previous_ms: 0,
             scroll_velocity: (0, 0),
             scrolled_ms: 0,
@@ -467,7 +485,7 @@ impl Recognizer {
             _ => None,
         };
         let taps = self.pending_taps.map(|taps| match taps.touch {
-            Some((started_ms, _)) => started_ms + u64::from(self.config.tap_ms),
+            Some((started_ms, _, _)) => started_ms + u64::from(self.config.tap_ms),
             None => taps.lifted_ms + u64::from(self.config.tap_drag_ms),
         });
         let drag_lock = self
@@ -548,14 +566,19 @@ impl Recognizer {
     ) -> Option<()> {
         let taps = self.pending_taps?;
         match taps.touch {
-            Some((started_ms, held)) => match frame.count {
-                // Lifted before it moved or rested: another tap.
+            Some((started_ms, held, strength)) => match frame.count {
+                // Lifted before it moved or rested: another tap, unless it only grazed.
                 0 => {
-                    self.pending_taps = Some(PendingTaps {
-                        count: (taps.count + 1).min(MAX_PENDING_TAPS),
-                        lifted_ms: frame.at_ms,
-                        touch: None,
-                        ..taps
+                    let elapsed = frame.at_ms.saturating_sub(started_ms);
+                    self.pending_taps = Some(if self.firm(elapsed, strength) {
+                        PendingTaps {
+                            count: (taps.count + 1).min(MAX_PENDING_TAPS),
+                            lifted_ms: frame.at_ms,
+                            touch: None,
+                            ..taps
+                        }
+                    } else {
+                        PendingTaps { touch: None, ..taps }
                     });
                     self.reset();
                 }
@@ -572,7 +595,7 @@ impl Recognizer {
                         out.cursor(held);
                     } else {
                         self.pending_taps = Some(PendingTaps {
-                            touch: Some((started_ms, held)),
+                            touch: Some((started_ms, held, strength.max(frame.strength))),
                             ..taps
                         });
                     }
@@ -592,7 +615,7 @@ impl Recognizer {
                 {
                     self.pending_taps = Some(PendingTaps {
                         at: landed,
-                        touch: Some((frame.at_ms, (0, 0))),
+                        touch: Some((frame.at_ms, (0, 0), frame.strength)),
                         ..taps
                     });
                 } else {
@@ -643,7 +666,7 @@ impl Recognizer {
         if let Some(taps) = self.pending_taps {
             match taps.touch {
                 // The touch after the taps rested: a drag, with whatever it moved.
-                Some((started_ms, held)) if now_ms >= started_ms + u64::from(self.config.tap_ms) => {
+                Some((started_ms, held, _)) if now_ms >= started_ms + u64::from(self.config.tap_ms) => {
                     let lead = self.previous.iter().enumerate().find_map(|(i, p)| p.map(|p| (i, p)));
                     self.start_tap_drag(lead, &mut out);
                     out.cursor(held);
@@ -737,6 +760,7 @@ impl Recognizer {
                 _ => {}
             }
         }
+        touch.peak_strength = touch.peak_strength.max(frame.strength);
 
         if self.check_hold(frame.at_ms, bound, &mut out) {
             return out;
@@ -797,10 +821,21 @@ impl Recognizer {
         let Some(touch) = self.touch else {
             return;
         };
+        // A finger that moved the cursor shows how strongly it usually touches.
+        if touch.max_fingers == 1 && touch.moved && touch.peak_strength > 0 {
+            let peak = u32::from(touch.peak_strength);
+            self.typical_strength = match self.typical_strength {
+                0 => peak,
+                typical => (typical * 3 + peak) / 4,
+            };
+        }
         if touch.moved || touch.acted {
             return;
         }
         let elapsed = at_ms.saturating_sub(touch.started_ms);
+        if !self.firm(elapsed, touch.peak_strength) {
+            return;
+        }
         let (gesture, limit) = match touch.max_fingers {
             1 if touch.travel > self.px.tap_move => return,
             1 => (TouchGesture::Tap, self.config.tap_ms),
@@ -821,6 +856,16 @@ impl Recognizer {
                 out.tap(gesture);
             }
         }
+    }
+
+    /// Whether a touch lasting `elapsed_ms` that touched this strongly is firm enough
+    /// for a tap rather than a graze.
+    fn firm(&self, elapsed_ms: u64, strength: u16) -> bool {
+        let percent = u32::from(self.config.tap_min_strength_percent);
+        elapsed_ms >= u64::from(self.config.tap_min_ms)
+            && (percent == 0
+                || self.typical_strength == 0
+                || u32::from(strength) * 100 >= self.typical_strength * percent)
     }
 
     /// No longer two fingers: a flick fires if it was lifted soon after touching, far
@@ -1183,6 +1228,7 @@ mod tests {
         Step::Frame(Frame {
             count: all.iter().flatten().count() as u8,
             slots: all,
+            strength: if all.iter().any(Option::is_some) { 1000 } else { 0 },
             at_ms,
         })
     }
@@ -1406,6 +1452,80 @@ mod tests {
         assert_eq!(keys(&outs[2..3]), tapped(Tap));
         assert_eq!(axes(&outs), vec![[(Axis::X, 10), (Axis::Y, 0)]]);
         assert!(recognizer.pending_taps.is_none() && recognizer.drag.is_none());
+    }
+
+    /// One finger at `a`, touching this strongly.
+    fn light(at_ms: u64, a: Point, strength: u16) -> Step {
+        let Step::Frame(frame) = one(at_ms, a) else {
+            unreachable!()
+        };
+        Step::Frame(Frame { strength, ..frame })
+    }
+
+    #[test]
+    fn a_touch_too_short_for_a_tap_is_a_graze() {
+        let config = TouchGestureConfig {
+            tap_min_ms: 20,
+            ..TouchGestureConfig::default()
+        };
+        let (outs, _) = run_with(config, bound, &[one(0, (100, 100)), lift(10), Step::Timeout(500)]);
+        assert!(keys(&outs).is_empty());
+        let (outs, _) = run_with(config, bound, &[one(0, (100, 100)), lift(30), Step::Timeout(500)]);
+        assert_eq!(keys(&outs), tapped(Tap));
+    }
+
+    #[test]
+    fn a_touch_much_lighter_than_usual_is_a_graze() {
+        let config = TouchGestureConfig {
+            tap_min_strength_percent: 50,
+            ..TouchGestureConfig::default()
+        };
+        // A light tap counts until the usual strength is known.
+        let (outs, _) = run_with(
+            config,
+            bound,
+            &[light(0, (100, 100), 300), lift(50), Step::Timeout(400)],
+        );
+        assert_eq!(keys(&outs), tapped(Tap));
+        let (outs, recognizer) = run_with(
+            config,
+            bound,
+            &[
+                // Moving the cursor at 1000 teaches the usual strength.
+                light(0, (100, 100), 1000),
+                light(10, (200, 100), 1000),
+                lift(20),
+                light(1000, (100, 100), 300), // a graze
+                lift(1050),
+                Step::Timeout(1500),
+                light(2000, (100, 100), 600), // firm enough
+                lift(2050),
+                Step::Timeout(2500),
+            ],
+        );
+        assert_eq!(recognizer.typical_strength, 1000);
+        assert_eq!(keys(&outs), tapped(Tap));
+        assert_eq!(keys(&outs[8..9]), tapped(Tap));
+    }
+
+    #[test]
+    fn a_graze_after_a_tap_is_no_second_tap() {
+        let config = TouchGestureConfig {
+            tap_min_ms: 20,
+            ..TouchGestureConfig::default()
+        };
+        let (outs, _) = run_with(
+            config,
+            bound,
+            &[
+                one(0, (100, 100)),
+                lift(80),
+                one(150, (100, 100)),
+                lift(155),
+                Step::Timeout(400),
+            ],
+        );
+        assert_eq!(keys(&outs), tapped(Tap));
     }
 
     #[test]
