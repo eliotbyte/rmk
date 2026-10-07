@@ -1,6 +1,6 @@
 use quote::quote;
-use rmk_config::KeyboardTomlConfig;
 use rmk_config::resolved::{Host, Identity, Keymap};
+use rmk_config::KeyboardTomlConfig;
 
 pub(crate) fn read_keyboard_toml_config() -> KeyboardTomlConfig {
     // Get the path of the keyboard config file from the environment variable
@@ -27,11 +27,17 @@ pub(crate) fn expand_keyboard_info(
     let num_row = keymap.rows as usize;
     let num_layer = keymap.layers as usize;
     let total_num_encoder = keymap.num_encoder;
+    // Only boards with touchpads use it; others would warn about an unused constant.
+    let num_touchpad = (keymap.num_touchpad > 0).then(|| {
+        let total_num_touchpad = keymap.num_touchpad;
+        quote! { pub(crate) const NUM_TOUCHPAD: usize = #total_num_touchpad; }
+    });
     quote! {
         pub(crate) const COL: usize = #num_col;
         pub(crate) const ROW: usize = #num_row;
         pub(crate) const NUM_LAYER: usize = #num_layer;
         pub(crate) const NUM_ENCODER: usize = #total_num_encoder;
+        #num_touchpad
         const KEYBOARD_DEVICE_CONFIG: ::rmk::config::DeviceConfig = ::rmk::config::DeviceConfig {
             vid: #vid,
             pid: #pid,

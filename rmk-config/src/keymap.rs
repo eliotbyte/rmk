@@ -111,6 +111,17 @@ impl KeyboardTomlConfig {
         }
 
         let encoder_map = Self::resolve_encoders(layers, &aliases)?;
+        let touch_map = layers
+            .iter()
+            .map(|layer| {
+                layer
+                    .touch
+                    .iter()
+                    .flatten()
+                    .map(|touchpad| touchpad.try_map(|action| Self::alias_resolver(action, &aliases)))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok((
             KeymapConfig {
@@ -119,6 +130,7 @@ impl KeyboardTomlConfig {
                 layers: num_layers,
                 keymap,
                 encoder_map,
+                touch_map,
             },
             key_info,
         ))
@@ -836,6 +848,51 @@ mod tests {
         assert!(two_encoder_config("").keymap().is_ok());
     }
 
+    /// A board with a touchpad with gestures and one without.
+    fn touchpad_config(layer_lines: &str) -> KeyboardTomlConfig {
+        config(&format!(
+            "[matrix]\nrow_pins = [\"r0\"]\ncol_pins = [\"c0\"]\n\
+             [layout]\nrows = 1\ncols = 1\nmap = \"(0,0)\"\n\
+             [aliases]\nclick = \"MouseBtn1\"\n\
+             [keymap]\n[[keymap.layer]]\nkeys = \"A\"\n{layer_lines}\n\
+             [[input_device.iqs5xx]]\nname = \"pad\"\ni2c = {{ instance = \"TWISPI0\", sda = \"P0_17\", scl = \"P0_20\" }}\n\
+             [input_device.iqs5xx.gestures]\n\
+             [[input_device.iqs5xx]]\nname = \"plain\"\ni2c = {{ instance = \"TWISPI1\", sda = \"P0_01\", scl = \"P0_02\" }}\n"
+        ))
+    }
+
+    #[test]
+    fn touch_actions_resolve_per_touchpad_with_gestures() {
+        let keymap = touchpad_config("touch = [{ tap = \"@click\", zoom_in = \"WM(Equal, LCtrl)\" }]")
+            .keymap()
+            .unwrap();
+        assert_eq!(keymap.num_touchpad, 1);
+        let pad = &keymap.touch_map[0][0];
+        assert_eq!(pad.tap.as_deref(), Some("MouseBtn1"));
+        assert_eq!(pad.zoom_in.as_deref(), Some("WM(Equal, LCtrl)"));
+        assert_eq!(pad.hold, None);
+    }
+
+    #[test]
+    fn touch_lists_must_cover_every_touchpad_or_none() {
+        assert!(touchpad_config("").keymap().is_ok());
+        assert!(
+            touchpad_config("touch = [{ tap = \"A\" }, { tap = \"B\" }]")
+                .keymap()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_unknown_gesture_is_rejected() {
+        assert!(
+            toml::from_str::<KeyboardTomlConfig>(
+                "[keymap]\n[[keymap.layer]]\nkeys = \"A\"\ntouch = [{ triple_tap = \"A\" }]\n"
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn encoders_resolve_without_a_board() {
         // Simulator scenarios have no [matrix]/[split]; [input_device] still counts.
@@ -869,6 +926,7 @@ mod tests {
             name: None,
             keys: "A B".to_string(),
             encoders: None,
+            touch: None,
         };
         let seq = vec![(0u8, 0u8), (0, 1), (0, 2)];
         let context = LayerBuildContext {

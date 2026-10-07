@@ -1,11 +1,11 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use rmk_config::SplitConnection;
-use rmk_config::resolved::Hardware;
 use rmk_config::resolved::hardware::{
     BleConfig, BoardConfig, ChipModel, ChipSeries, CommunicationConfig, DfuConfig,
     InputDeviceConfig, MatrixType, SplitBoardConfig, SplitConfig,
 };
+use rmk_config::resolved::Hardware;
+use rmk_config::SplitConnection;
 use syn::ItemMod;
 
 use super::central::expand_serial_init;
@@ -836,6 +836,8 @@ pub(crate) fn expand_peripheral_input_device_config(
                 .iqs5xx
                 .unwrap_or(Vec::new()),
             chip,
+            // Touch map indices only matter for the processors, which run on the central.
+            0,
         ),
         _ => (vec![], vec![]),
     };

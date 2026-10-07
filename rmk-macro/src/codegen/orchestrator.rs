@@ -1,10 +1,10 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use rmk_config::DebouncerType;
 use rmk_config::resolved::hardware::{
     BoardConfig, ChipSeries, KeyInfo, MatrixConfig, MatrixType, UniBodyConfig,
 };
 use rmk_config::resolved::{Behavior, Hardware, Host, Identity, Keymap, Layout};
+use rmk_config::DebouncerType;
 use rmk_types::ble::{BLE_ADV_NAME_MAX_LEN, BLE_DIS_STRING_MAX_LEN};
 
 use super::behavior::expand_behavior_config;
@@ -223,35 +223,35 @@ mod tests {
 
     #[test]
     fn accepts_matching_feature_config_states() {
-        assert!(
-            validate_feature_config_parity(
-                &features(&["storage", "vial"]),
-                true,
-                true,
-                false,
-                false,
-            )
-            .is_ok()
-        );
+        assert!(validate_feature_config_parity(
+            &features(&["storage", "vial"]),
+            true,
+            true,
+            false,
+            false,
+        )
+        .is_ok());
         assert!(validate_feature_config_parity(&features(&[]), false, false, false, false).is_ok());
         assert!(
             validate_feature_config_parity(&features(&["storage"]), true, false, false, false)
                 .is_ok()
         );
-        assert!(
-            validate_feature_config_parity(
-                &features(&["storage", "rynk"]),
-                true,
-                false,
-                true,
-                false,
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_feature_config_parity(&features(&["dfu_lock"]), false, false, false, true,)
-                .is_ok()
-        );
+        assert!(validate_feature_config_parity(
+            &features(&["storage", "rynk"]),
+            true,
+            false,
+            true,
+            false,
+        )
+        .is_ok());
+        assert!(validate_feature_config_parity(
+            &features(&["dfu_lock"]),
+            false,
+            false,
+            false,
+            true,
+        )
+        .is_ok());
     }
 
     #[test]
@@ -627,7 +627,15 @@ pub(crate) fn expand_keymap_and_storage(hardware: &Hardware, keymap: &Keymap) ->
 
     let total_num_encoders = keymap.num_encoder;
 
-    let keymap_data_init = if total_num_encoders == 0 {
+    let keymap_data_init = if keymap.num_touchpad > 0 {
+        quote! {
+            let mut keymap_data = ::rmk::KeymapData::new_with_touch(
+                get_default_keymap(),
+                get_default_encoder_map(),
+                get_default_touch_map(),
+            );
+        }
+    } else if total_num_encoders == 0 {
         quote! {
             let mut keymap_data = ::rmk::KeymapData::new(get_default_keymap());
         }

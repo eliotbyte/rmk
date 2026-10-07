@@ -1,14 +1,17 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use rmk_config::resolved::hardware::{ChipModel, ChipSeries, Iqs5xxConfig};
+use rmk_config::TouchGesturesConfig;
 
 use super::{Initializer, expand_pointing_acceleration};
 
-/// Expand IQS5xx device configuration.
+/// Expand IQS5xx device configuration. `first_touchpad_id` is the touch map index of
+/// the first of these trackpads with gestures; the others with gestures follow.
 /// Returns (device initializers, processor initializers).
 pub(crate) fn expand_iqs5xx_device(
     iqs5xx_config: Vec<Iqs5xxConfig>,
     chip: &ChipModel,
+    first_touchpad_id: usize,
 ) -> (Vec<Initializer>, Vec<Initializer>) {
     if iqs5xx_config.is_empty() {
         return (Vec::new(), Vec::new());
@@ -23,6 +26,7 @@ pub(crate) fn expand_iqs5xx_device(
 
     let mut device_initializers = vec![];
     let mut processor_initializers = vec![];
+    let mut touchpad_id = first_touchpad_id;
 
     for (idx, sensor) in iqs5xx_config.iter().enumerate() {
         let sensor_id = sensor.id.unwrap_or(0);
@@ -50,6 +54,12 @@ pub(crate) fn expand_iqs5xx_device(
         let proc_acceleration = expand_pointing_acceleration(&sensor.proc_acceleration);
         let proc_scroll_acceleration =
             expand_pointing_acceleration(&sensor.proc_scroll_acceleration);
+
+        let with_touch_frames = sensor
+            .gestures
+            .as_ref()
+            .map(|_| quote! { .with_touch_frames() });
+        let device_scroll = expand_device_scroll(sensor.gestures.as_ref());
 
         let rdy_init = match (&sensor.rdy, &chip.series) {
             (Some(rdy_pin), ChipSeries::Nrf52) => {
@@ -96,7 +106,7 @@ pub(crate) fn expand_iqs5xx_device(
                     #sensor_id,
                     #i2c_ident,
                     #rdy_ident,
-                );
+                )#with_touch_frames;
             },
             ChipSeries::Rp2040 => quote! {
                 #rdy_init
@@ -111,7 +121,7 @@ pub(crate) fn expand_iqs5xx_device(
                     #sensor_id,
                     #i2c_ident,
                     #rdy_ident,
-                );
+                )#with_touch_frames;
             },
             _ => unreachable!(),
         };
@@ -129,7 +139,7 @@ pub(crate) fn expand_iqs5xx_device(
                 swap_xy: #proc_swap_xy,
                 acceleration: #proc_acceleration,
                 scroll_acceleration: #proc_scroll_acceleration,
-                device_scroll: ::rmk::input_device::pointing::ScrollConfig::default(),
+                device_scroll: #device_scroll,
             };
             let mut #processor_ident = ::rmk::input_device::pointing::PointingProcessor::new(
                 &keymap,
@@ -141,9 +151,97 @@ pub(crate) fn expand_iqs5xx_device(
             initializer: processor_init,
             var_name: processor_ident,
         });
+
+        if let Some(gestures) = &sensor.gestures {
+            let touch_ident = format_ident!("{}_touch", sensor_name);
+            let config = expand_touch_gesture_config(
+                gestures,
+                sensor_id,
+                touchpad_id,
+                (proc_invert_x, proc_invert_y, proc_swap_xy),
+            );
+            touchpad_id += 1;
+            processor_initializers.push(Initializer {
+                initializer: quote! {
+                    let mut #touch_ident = ::rmk::input_device::touch::TouchGestureProcessor::new(&keymap, #config);
+                },
+                var_name: touch_ident,
+            });
+        }
     }
 
     (device_initializers, processor_initializers)
+}
+
+/// The PointingProcessor's handling of a trackpad's two-finger scrolling.
+fn expand_device_scroll(gestures: Option<&TouchGesturesConfig>) -> TokenStream {
+    let divisor = gestures.and_then(|g| g.scroll_divisor).unwrap_or(8);
+    // Natural scrolling moves the content with the fingers: the wheel turns the other way.
+    let natural = gestures.is_some_and(|g| g.natural_scroll);
+    quote! {
+        ::rmk::input_device::pointing::ScrollConfig {
+            multiplier_x: 1,
+            divisor_x: #divisor,
+            multiplier_y: 1,
+            divisor_y: #divisor,
+            invert_x: #natural,
+            invert_y: #natural,
+        }
+    }
+}
+
+/// A `TouchGestureConfig` from `[input_device.iqs5xx.gestures]`, with the
+/// PointingProcessor's `(invert_x, invert_y, swap_xy)` so swipes go the cursor's way.
+fn expand_touch_gesture_config(
+    gestures: &TouchGesturesConfig,
+    device_id: u8,
+    touchpad_id: usize,
+    (invert_x, invert_y, swap_xy): (bool, bool, bool),
+) -> TokenStream {
+    let touchpad_id = u8::try_from(touchpad_id).expect("at most 256 touchpads");
+    let cos_permille =
+        |degrees: u8| ((f64::from(degrees)).to_radians().cos() * 1000.0).round() as u16;
+    let scroll = gestures.scroll.unwrap_or(true);
+    let scroll_both_axes = gestures.scroll_both_axes;
+    let decide_percent = gestures.decide_percent.unwrap_or(4);
+    let tap_ms = gestures.tap_ms.unwrap_or(200);
+    let multi_finger_tap_ms = gestures.multi_finger_tap_ms.unwrap_or(300);
+    let hold_ms = gestures.hold_ms.unwrap_or(300);
+    let zoom_cos_permille = cos_permille(gestures.zoom_angle.unwrap_or(25));
+    let zoom_step_percent = gestures.zoom_step_percent.unwrap_or(6);
+    let swipe_percent = gestures.swipe_percent.unwrap_or(10);
+    let swipe_ms = gestures.swipe_ms.unwrap_or(250);
+    let swipe_cos_permille = cos_permille(gestures.swipe_angle.unwrap_or(30));
+    let three_finger_swipe_percent = gestures.three_finger_swipe_percent.unwrap_or(15);
+    quote! {
+        ::rmk::input_device::touch::TouchGestureConfig {
+            device_id: #device_id,
+            touchpad_id: #touchpad_id,
+            invert_x: #invert_x,
+            invert_y: #invert_y,
+            swap_xy: #swap_xy,
+            scroll: #scroll,
+            scroll_both_axes: #scroll_both_axes,
+            decide_percent: #decide_percent,
+            tap_ms: #tap_ms,
+            multi_finger_tap_ms: #multi_finger_tap_ms,
+            hold_ms: #hold_ms,
+            zoom_cos_permille: #zoom_cos_permille,
+            zoom_step_percent: #zoom_step_percent,
+            swipe_percent: #swipe_percent,
+            swipe_ms: #swipe_ms,
+            swipe_cos_permille: #swipe_cos_permille,
+            three_finger_swipe_percent: #three_finger_swipe_percent,
+        }
+    }
+}
+
+/// How many of `iqs5xx_config` have gestures, so take touch map indices.
+pub(crate) fn count_touchpads(iqs5xx_config: &[Iqs5xxConfig]) -> usize {
+    iqs5xx_config
+        .iter()
+        .filter(|sensor| sensor.gestures.is_some())
+        .count()
 }
 
 /// Generate `bind_interrupts!` entries for the I²C peripherals used by IQS5xx

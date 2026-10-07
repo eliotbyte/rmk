@@ -626,6 +626,8 @@ pub(crate) struct LayerTomlConfig {
     pub name: Option<String>,
     pub keys: String,
     pub encoders: Option<Vec<[String; 2]>>,
+    /// Gesture actions, one entry per touchpad with gestures.
+    pub touch: Option<Vec<TouchActionsConfig>>,
 }
 
 /// Configurations for keyboard info
@@ -843,6 +845,7 @@ pub(crate) struct KeymapConfig {
     pub layers: u8,
     pub keymap: Vec<Vec<Vec<String>>>,
     pub encoder_map: Vec<Vec<[String; 2]>>, // Empty if there are no encoders or not configured
+    pub touch_map: Vec<Vec<TouchActionsConfig>>, // Empty if there are no touchpads or not configured
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1410,6 +1413,130 @@ pub struct Iqs5xxConfig {
     pub proc_acceleration: Option<PointingAccelerationConfig>,
     /// Scroll-mode acceleration in the PointingProcessor. Off unless configured.
     pub proc_scroll_acceleration: Option<PointingAccelerationConfig>,
+    /// Gestures. Off unless configured.
+    pub gestures: Option<TouchGesturesConfig>,
+}
+
+/// One touchpad's gesture actions on a layer: an entry of `[[keymap.layer]].touch`.
+/// A gesture left out has no action on that layer and isn't recognized there.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TouchActionsConfig {
+    /// One finger touching and lifting without moving, e.g. `"MouseBtn1"`.
+    pub tap: Option<String>,
+    /// e.g. `"MouseBtn2"`.
+    pub two_finger_tap: Option<String>,
+    /// e.g. `"MouseBtn3"`.
+    pub three_finger_tap: Option<String>,
+    /// One finger held still: pressed until every finger lifts, so the fingers can drag
+    /// meanwhile. `"MouseBtn1"` gives drag-and-drop.
+    pub hold: Option<String>,
+    /// Two fingers moving apart, once per zoom step, e.g. `"WM(Equal, LCtrl)"`.
+    pub zoom_in: Option<String>,
+    /// Two fingers moving together, once per zoom step.
+    pub zoom_out: Option<String>,
+    /// Two fingers flicked one way: once per touch, in place of scrolling that way.
+    /// Directions are the cursor's.
+    pub two_finger_swipe_left: Option<String>,
+    pub two_finger_swipe_right: Option<String>,
+    pub two_finger_swipe_up: Option<String>,
+    pub two_finger_swipe_down: Option<String>,
+    /// Three fingers moving far one way: once per touch.
+    pub three_finger_swipe_left: Option<String>,
+    pub three_finger_swipe_right: Option<String>,
+    pub three_finger_swipe_up: Option<String>,
+    pub three_finger_swipe_down: Option<String>,
+}
+
+impl TouchActionsConfig {
+    /// Each gesture's action by its `rmk_types::action::TouchGesture` variant name.
+    pub fn actions(&self) -> [(&'static str, &Option<String>); 14] {
+        [
+            ("Tap", &self.tap),
+            ("TwoFingerTap", &self.two_finger_tap),
+            ("ThreeFingerTap", &self.three_finger_tap),
+            ("Hold", &self.hold),
+            ("ZoomIn", &self.zoom_in),
+            ("ZoomOut", &self.zoom_out),
+            ("TwoFingerSwipeLeft", &self.two_finger_swipe_left),
+            ("TwoFingerSwipeRight", &self.two_finger_swipe_right),
+            ("TwoFingerSwipeUp", &self.two_finger_swipe_up),
+            ("TwoFingerSwipeDown", &self.two_finger_swipe_down),
+            ("ThreeFingerSwipeLeft", &self.three_finger_swipe_left),
+            ("ThreeFingerSwipeRight", &self.three_finger_swipe_right),
+            ("ThreeFingerSwipeUp", &self.three_finger_swipe_up),
+            ("ThreeFingerSwipeDown", &self.three_finger_swipe_down),
+        ]
+    }
+
+    /// The same with every action changed by `f`.
+    pub(crate) fn try_map(&self, mut f: impl FnMut(&str) -> Result<String, String>) -> Result<Self, String> {
+        let mut map = |action: &Option<String>| action.as_deref().map(&mut f).transpose();
+        Ok(Self {
+            tap: map(&self.tap)?,
+            two_finger_tap: map(&self.two_finger_tap)?,
+            three_finger_tap: map(&self.three_finger_tap)?,
+            hold: map(&self.hold)?,
+            zoom_in: map(&self.zoom_in)?,
+            zoom_out: map(&self.zoom_out)?,
+            two_finger_swipe_left: map(&self.two_finger_swipe_left)?,
+            two_finger_swipe_right: map(&self.two_finger_swipe_right)?,
+            two_finger_swipe_up: map(&self.two_finger_swipe_up)?,
+            two_finger_swipe_down: map(&self.two_finger_swipe_down)?,
+            three_finger_swipe_left: map(&self.three_finger_swipe_left)?,
+            three_finger_swipe_right: map(&self.three_finger_swipe_right)?,
+            three_finger_swipe_up: map(&self.three_finger_swipe_up)?,
+            three_finger_swipe_down: map(&self.three_finger_swipe_down)?,
+        })
+    }
+}
+
+/// Touchpad gesture recognition (`[input_device.<touchpad>.gestures]`). Its presence
+/// turns gestures on for that touchpad: it then reports finger positions, and the
+/// central recognizes gestures from them. What each gesture does is set per layer in
+/// `[[keymap.layer]].touch`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TouchGesturesConfig {
+    /// Two-finger scrolling. Defaults to on.
+    pub scroll: Option<bool>,
+    /// Touchpad movement per scroll step; larger scrolls slower. Defaults to 8.
+    pub scroll_divisor: Option<u8>,
+    /// Content follows the fingers, as on a phone.
+    #[serde(default)]
+    pub natural_scroll: bool,
+    /// Scroll along both axes at once. Off by default: a scroll keeps to the axis it
+    /// started along until the fingers lift.
+    #[serde(default)]
+    pub scroll_both_axes: bool,
+    /// A finger moving this far, in percent of the touchpad's longer side, makes a
+    /// touch no tap or hold, and decides between a two-finger scroll and zoom.
+    /// Defaults to 4.
+    pub decide_percent: Option<u8>,
+    /// A one-finger tap lifts within this many milliseconds. Defaults to 200.
+    pub tap_ms: Option<u16>,
+    /// A two- or three-finger tap lifts within this many milliseconds. Defaults to 300.
+    pub multi_finger_tap_ms: Option<u16>,
+    /// One finger held still this many milliseconds is a hold. Defaults to 300.
+    pub hold_ms: Option<u16>,
+    /// A zoom needs both fingers moving in opposite directions along the line between
+    /// them, within this many degrees. Lower is stricter. Defaults to 25.
+    pub zoom_angle: Option<u8>,
+    /// How much the distance between the fingers changes per zoom step, in percent of
+    /// the touchpad's longer side. Defaults to 6.
+    pub zoom_step_percent: Option<u8>,
+    /// How far the fingers move for a two-finger swipe, in percent of the touchpad's
+    /// size in that direction. Defaults to 10.
+    pub swipe_percent: Option<u8>,
+    /// A two-finger swipe is a flick: the fingers lift within this many milliseconds
+    /// of touching. Moving longer scrolls. Defaults to 250.
+    pub swipe_ms: Option<u16>,
+    /// How many degrees a two- or three-finger swipe may stray from its direction.
+    /// Defaults to 30.
+    pub swipe_angle: Option<u8>,
+    /// How far the fingers move for a three-finger swipe, in percent of the touchpad's
+    /// size in that direction. Defaults to 15.
+    pub three_finger_swipe_percent: Option<u8>,
 }
 
 /// I²C bus configuration for the IQS5xx. Distinct from the generic `I2cConfig`

@@ -197,6 +197,15 @@ impl crate::KeyboardTomlConfig {
             event.subs += pointing_devices;
         }
 
+        // Each touchpad with gestures has a gesture processor subscribing to its touch
+        // frames, and a split peripheral forwards its frames to the central.
+        let touchpads = self.total_touchpads();
+        if touchpads > 0
+            && let Some(event) = events.iter_mut().find(|event| event.name == "touch")
+        {
+            event.subs += touchpads + usize::from(active_features.contains(&"split"));
+        }
+
         // Every link subscribes to the outgoing queue, so a central needs one
         // slot per split peripheral on top of its link toward the dongle.
         if active_features.contains(&"custom_message")
@@ -406,6 +415,32 @@ mod tests {
         // Nobody listens on a screenless dongle, so publishing there is a no-op.
         assert_eq!(subs(&["dongle", "_ble", "storage"]), 0);
         assert_eq!(subs(&["dongle", "display", "_ble", "storage"]), 1);
+    }
+
+    #[test]
+    fn touchpads_with_gestures_reserve_touch_subscribers() {
+        let subs = |toml: &str, features: &[&str]| {
+            parse(toml)
+                .build_constants(features)
+                .unwrap()
+                .events
+                .into_iter()
+                .find(|event| event.name == "touch")
+                .unwrap()
+                .subs
+        };
+        let pad = |gestures: &str| {
+            format!(
+                "[[input_device.iqs5xx]]\nname = \"pad\"\n\
+                 i2c = {{ instance = \"TWISPI0\", sda = \"P0_17\", scl = \"P0_20\" }}\n{gestures}"
+            )
+        };
+        // Nothing by default, so boards without a touchpad pay nothing.
+        assert_eq!(subs("", &[]), 0);
+        assert_eq!(subs(&pad(""), &[]), 0);
+        // One gesture processor, plus the peripheral's forwarder on a split board.
+        assert_eq!(subs(&pad("[input_device.iqs5xx.gestures]\n"), &[]), 1);
+        assert_eq!(subs(&pad("[input_device.iqs5xx.gestures]\n"), &["split"]), 2);
     }
 
     #[test]

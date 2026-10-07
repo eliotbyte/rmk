@@ -1,6 +1,6 @@
 use adc::expand_adc_device;
 use encoder::expand_encoder_device;
-use iqs5xx::expand_iqs5xx_device;
+use iqs5xx::{count_touchpads, expand_iqs5xx_device};
 use pmw33xx::expand_pmw33xx_device;
 use pmw3610::expand_pmw3610_device;
 use proc_macro2::{Ident, TokenStream};
@@ -259,22 +259,21 @@ pub(crate) fn expand_input_device_config(
         }
     }
 
-    // generate IQS5xx configuration
-    let (iqs5xx_device_initializers, iqs5xx_processor_initializers) = match board {
-        BoardConfig::UniBody(UniBodyConfig { input_device, .. }) => {
-            expand_iqs5xx_device(input_device.clone().iqs5xx.unwrap_or(Vec::new()), chip)
-        }
-        BoardConfig::Split(split_config) => expand_iqs5xx_device(
-            split_config
-                .central
-                .input_device
-                .clone()
-                .unwrap_or(InputDeviceConfig::default())
-                .iqs5xx
-                .unwrap_or(Vec::new()),
-            chip,
-        ),
+    // generate IQS5xx configuration. Touch map indices go to the central's (or
+    // unibody's) trackpads with gestures first, then each peripheral's.
+    let central_iqs5xx = match board {
+        BoardConfig::UniBody(UniBodyConfig { input_device, .. }) => input_device.clone().iqs5xx.unwrap_or(Vec::new()),
+        BoardConfig::Split(split_config) => split_config
+            .central
+            .input_device
+            .clone()
+            .unwrap_or(InputDeviceConfig::default())
+            .iqs5xx
+            .unwrap_or(Vec::new()),
     };
+    let mut next_touchpad_id = count_touchpads(&central_iqs5xx);
+    let (iqs5xx_device_initializers, iqs5xx_processor_initializers) =
+        expand_iqs5xx_device(central_iqs5xx, chip, 0);
 
     for initializer in iqs5xx_device_initializers {
         initialization.extend(initializer.initializer);
@@ -300,8 +299,10 @@ pub(crate) fn expand_input_device_config(
                 .unwrap_or(Vec::new());
 
             // Only generate processors (not devices) for peripheral IQS5xx
+            let first_touchpad_id = next_touchpad_id;
+            next_touchpad_id += count_touchpads(&peripheral_iqs5xx_config);
             let (_, peripheral_iqs5xx_processors) =
-                expand_iqs5xx_device(peripheral_iqs5xx_config, chip);
+                expand_iqs5xx_device(peripheral_iqs5xx_config, chip, first_touchpad_id);
 
             for initializer in peripheral_iqs5xx_processors {
                 initialization.extend(initializer.initializer);
