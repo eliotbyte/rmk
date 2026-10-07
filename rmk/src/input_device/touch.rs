@@ -261,6 +261,8 @@ struct Touch {
     peak_strength: u16,
     /// Something other than a tap happened: a scroll, zoom, swipe or hold.
     acted: bool,
+    /// It rested long enough for a hold, which had no action.
+    hold_passed: bool,
 }
 
 /// A drag: `gesture`'s key stays down while any finger touches, so another finger
@@ -536,12 +538,7 @@ impl Recognizer {
     /// a touch after a tap resting long enough to drag, or taps clicking once the
     /// tap-drag window has passed.
     fn deadline(&self) -> Option<u64> {
-        let hold = match self.touch {
-            Some(touch) if self.drag.is_none() && touch.max_fingers == 1 && !touch.moved && !touch.acted => {
-                Some(touch.started_ms + u64::from(self.config.hold_ms))
-            }
-            _ => None,
-        };
+        let hold = self.hold_deadline();
         let taps = self.pending_taps.map(|taps| match taps.touch {
             Some((started_ms, _, _)) => started_ms + u64::from(self.config.tap_ms),
             None => taps.lifted_ms + u64::from(self.config.tap_drag_ms),
@@ -685,11 +682,35 @@ impl Recognizer {
         Some(())
     }
 
+    /// When a still finger becomes a hold.
+    fn hold_deadline(&self) -> Option<u64> {
+        match self.touch {
+            Some(touch)
+                if self.drag.is_none()
+                    && touch.max_fingers == 1
+                    && !touch.moved
+                    && !touch.acted
+                    && !touch.hold_passed =>
+            {
+                Some(touch.started_ms + u64::from(self.config.hold_ms))
+            }
+            _ => None,
+        }
+    }
+
     /// Start a hold if a still finger has been down long enough and holds have an
     /// action.
     fn check_hold(&mut self, now_ms: u64, bound: &impl Fn(TouchGesture) -> bool, out: &mut Output) -> bool {
-        match self.deadline() {
-            Some(deadline) if now_ms >= deadline && bound(TouchGesture::Hold) => {
+        match self.hold_deadline() {
+            // Without an action the time is passed for good, or it would be due
+            // again at once until the finger moves.
+            Some(deadline) if now_ms >= deadline && !bound(TouchGesture::Hold) => {
+                if let Some(touch) = &mut self.touch {
+                    touch.hold_passed = true;
+                }
+                false
+            }
+            Some(deadline) if now_ms >= deadline => {
                 let _ = out.keys.push((TouchGesture::Hold, true));
                 self.drag = Some(Drag::new(
                     TouchGesture::Hold,
@@ -1923,6 +1944,24 @@ mod tests {
     fn a_frame_after_the_hold_time_holds_too() {
         let (outs, _) = run(&[one(0, (100, 100)), one(320, (101, 100))]);
         assert_eq!(keys(&outs), vec![(Hold, true)]);
+    }
+
+    #[test]
+    fn a_still_finger_without_a_hold_action_leaves_no_deadline_due() {
+        let mut recognizer = Recognizer::new(TouchGestureConfig::default());
+        let unbound = |gesture| gesture != Hold;
+        let frame = |at_ms| Frame {
+            count: 1,
+            slots: [Some((500, 500)), None, None],
+            strength: 800,
+            at_ms,
+        };
+        recognizer.frame(&frame(0), SIZE, &unbound);
+        let due = recognizer.deadline().unwrap();
+        recognizer.timeout(due, &unbound);
+        assert_eq!(recognizer.deadline(), None);
+        recognizer.frame(&frame(due + 10), SIZE, &unbound);
+        assert_eq!(recognizer.deadline(), None);
     }
 
     #[test]
