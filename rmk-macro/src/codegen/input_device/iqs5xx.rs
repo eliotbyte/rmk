@@ -216,6 +216,8 @@ fn expand_touch_gesture_config(
     let swipe_ms = gestures.swipe_ms.unwrap_or(250);
     let swipe_cos_permille = cos_permille(gestures.swipe_angle.unwrap_or(30));
     let three_finger_swipe_percent = gestures.three_finger_swipe_percent.unwrap_or(15);
+    let drag_lock_ms = gestures.drag_lock_ms.unwrap_or(0);
+    let scroll_inertia_ms = gestures.scroll_inertia_ms.unwrap_or(0);
     quote! {
         ::rmk::input_device::touch::TouchGestureConfig {
             device_id: #device_id,
@@ -238,6 +240,8 @@ fn expand_touch_gesture_config(
             swipe_ms: #swipe_ms,
             swipe_cos_permille: #swipe_cos_permille,
             three_finger_swipe_percent: #three_finger_swipe_percent,
+            drag_lock_ms: #drag_lock_ms,
+            scroll_inertia_ms: #scroll_inertia_ms,
         }
     }
 }

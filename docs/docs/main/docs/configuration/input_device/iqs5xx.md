@@ -89,6 +89,10 @@ name = "trackpad0"
 # swipe_ms = 250            # a two-finger flick lifts within this time; longer scrolls
 # swipe_angle = 30          # degrees a swipe may stray from its direction
 # three_finger_swipe_percent = 15
+# drag_lock_ms = 0          # a drag lasts this long after the fingers lift, so a finger put
+#                           # back down goes on with it; a quick tap ends it. 300 is a good start
+# scroll_inertia_ms = 0     # a quick two-finger scroll goes on after lifting, slowing down with
+#                           # this time constant; a touch stops it. 300-500 is a good start
 ```
 
 What each gesture does is set per layer in `[[keymap.layer]]`, like encoders,

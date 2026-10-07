@@ -15,6 +15,10 @@
 //! touch follows: tap, then touch and move holds the tap's action while the finger
 //! touches, so it drags; two quick taps double-click; and tap, tap, touch and move
 //! double-clicks and drags.
+//!
+//! Optionally a drag outlives a lifted finger briefly, so the finger can be put back
+//! down to go on (drag lock), and a two-finger scroll goes on and slows down after
+//! the fingers lift quickly (inertia).
 
 use embassy_futures::select::{Either, select};
 use embassy_time::{Instant, Timer};
@@ -89,6 +93,13 @@ pub struct TouchGestureConfig {
     /// How far three fingers move together for a three-finger swipe, in percent of the
     /// touchpad's size in the swipe's direction.
     pub three_finger_swipe_percent: u8,
+    /// A drag waits this many milliseconds after its fingers lift before it ends, so
+    /// a finger put back down goes on with it; a quick still tap then ends it at once.
+    /// 0 turns this off.
+    pub drag_lock_ms: u16,
+    /// A two-finger scroll that ends quickly goes on, slowing down with this time
+    /// constant in milliseconds, until a finger touches. 0 turns this off.
+    pub scroll_inertia_ms: u16,
 }
 
 impl Default for TouchGestureConfig {
@@ -114,6 +125,8 @@ impl Default for TouchGestureConfig {
             swipe_ms: 250,
             swipe_cos_permille: 866,
             three_finger_swipe_percent: 15,
+            drag_lock_ms: 0,
+            scroll_inertia_ms: 0,
         }
     }
 }
@@ -245,6 +258,40 @@ struct Drag {
     gesture: TouchGesture,
     /// The slot moving the cursor, and where it was last frame.
     lead: Option<(usize, Point)>,
+    /// When the fingers lifted, while drag lock keeps the drag going.
+    lifted_ms: Option<u64>,
+    /// The touch since drag lock caught the drag: when it started and how far it
+    /// moved, as a quick still one ends the drag.
+    relock: Option<(u64, u32)>,
+}
+
+impl Drag {
+    fn new(gesture: TouchGesture, lead: Option<(usize, Point)>) -> Self {
+        Self {
+            gesture,
+            lead,
+            lifted_ms: None,
+            relock: None,
+        }
+    }
+}
+
+/// How often inertial scrolling steps.
+const INERTIA_TICK_MS: u64 = 16;
+
+/// A scroll faster than this, in percent of the touchpad's longer side per second,
+/// goes on after the fingers lift; inertia stops below the second.
+const INERTIA_START_PERCENT_PER_S: u32 = 50;
+const INERTIA_STOP_PERCENT_PER_S: u32 = 5;
+
+/// A scroll going on after the fingers lifted, slowing down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Inertia {
+    /// Speed in touchpad units per second, on H and V.
+    velocity: Point,
+    last_ms: u64,
+    /// Fractions of a unit, in thousandths, carried to the next step.
+    rest: Point,
 }
 
 /// The most one-finger taps waiting to click; more in a row click as many.
@@ -355,6 +402,13 @@ struct Recognizer {
     previous: [Option<Point>; TOUCH_MAX_FINGERS],
     drag: Option<Drag>,
     pending_taps: Option<PendingTaps>,
+    inertia: Option<Inertia>,
+    /// When the last frame came.
+    previous_ms: u64,
+    /// The two-finger scroll's speed in touchpad units per second, and when it last
+    /// scrolled, for inertia.
+    scroll_velocity: Point,
+    scrolled_ms: u64,
     two_finger: TwoFinger,
     three_finger: ThreeFinger,
 }
@@ -368,6 +422,10 @@ impl Recognizer {
             previous: [None; TOUCH_MAX_FINGERS],
             drag: None,
             pending_taps: None,
+            inertia: None,
+            previous_ms: 0,
+            scroll_velocity: (0, 0),
+            scrolled_ms: 0,
             two_finger: TwoFinger::Idle,
             three_finger: ThreeFinger::Idle,
         }
@@ -412,10 +470,55 @@ impl Recognizer {
             Some((started_ms, _)) => started_ms + u64::from(self.config.tap_ms),
             None => taps.lifted_ms + u64::from(self.config.tap_drag_ms),
         });
-        match (hold, taps) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        let drag_lock = self
+            .drag
+            .and_then(|drag| drag.lifted_ms)
+            .map(|lifted_ms| lifted_ms + u64::from(self.config.drag_lock_ms));
+        let inertia = self.inertia.map(|inertia| inertia.last_ms + INERTIA_TICK_MS);
+        [hold, taps, drag_lock, inertia].into_iter().flatten().min()
+    }
+
+    /// One step of inertial scrolling, up to `now_ms`.
+    fn coast(&mut self, now_ms: u64, out: &mut Output) {
+        let Some(inertia) = &mut self.inertia else {
+            return;
+        };
+        let dt = now_ms.saturating_sub(inertia.last_ms).max(1) as i64;
+        let tau = i64::from(self.config.scroll_inertia_ms.max(1));
+        let step = |v: i32, rest: &mut i32| {
+            let total = i64::from(v) * dt + i64::from(*rest);
+            *rest = (total % 1000) as i32;
+            (total / 1000) as i32
+        };
+        let moved = (
+            step(inertia.velocity.0, &mut inertia.rest.0),
+            step(inertia.velocity.1, &mut inertia.rest.1),
+        );
+        // Exponential slowing: v' = v * tau / (tau + dt).
+        let slow = |v: i32| (i64::from(v) * tau / (tau + dt)) as i32;
+        inertia.velocity = (slow(inertia.velocity.0), slow(inertia.velocity.1));
+        inertia.last_ms = now_ms;
+        out.scroll(moved);
+        let stop = u32::from(self.px.size.0.max(self.px.size.1)) * INERTIA_STOP_PERCENT_PER_S / 100;
+        if len(inertia.velocity) < stop.max(1) {
+            self.inertia = None;
         }
+    }
+
+    /// Follow the scroll's speed, for inertia.
+    fn track_scroll(&mut self, moved: Point, at_ms: u64) {
+        let dt = at_ms.saturating_sub(self.previous_ms).max(1) as i32;
+        let now = (moved.0 * 1000 / dt, moved.1 * 1000 / dt);
+        // Average with the last speed, unless the fingers paused since.
+        self.scroll_velocity = if at_ms.saturating_sub(self.scrolled_ms) <= 50 {
+            (
+                (self.scroll_velocity.0 + now.0) / 2,
+                (self.scroll_velocity.1 + now.1) / 2,
+            )
+        } else {
+            now
+        };
+        self.scrolled_ms = at_ms;
     }
 
     /// Click the taps waiting out the tap-drag window.
@@ -431,10 +534,7 @@ impl Recognizer {
         if let Some(taps) = self.pending_taps.take() {
             out.taps(TouchGesture::Tap, taps.count - 1);
             let _ = out.keys.push((TouchGesture::Tap, true));
-            self.drag = Some(Drag {
-                gesture: TouchGesture::Tap,
-                lead,
-            });
+            self.drag = Some(Drag::new(TouchGesture::Tap, lead));
         }
     }
 
@@ -515,10 +615,10 @@ impl Recognizer {
         match self.deadline() {
             Some(deadline) if now_ms >= deadline && bound(TouchGesture::Hold) => {
                 let _ = out.keys.push((TouchGesture::Hold, true));
-                self.drag = Some(Drag {
-                    gesture: TouchGesture::Hold,
-                    lead: self.previous.iter().enumerate().find_map(|(i, p)| p.map(|p| (i, p))),
-                });
+                self.drag = Some(Drag::new(
+                    TouchGesture::Hold,
+                    self.previous.iter().enumerate().find_map(|(i, p)| p.map(|p| (i, p))),
+                ));
                 if let Some(touch) = &mut self.touch {
                     touch.acted = true;
                 }
@@ -530,6 +630,21 @@ impl Recognizer {
 
     fn timeout(&mut self, now_ms: u64, bound: &impl Fn(TouchGesture) -> bool) -> Output {
         let mut out = Output::default();
+        if self
+            .inertia
+            .is_some_and(|inertia| now_ms >= inertia.last_ms + INERTIA_TICK_MS)
+        {
+            self.coast(now_ms, &mut out);
+        }
+        // Drag lock ran out without a finger coming back: the drag ends.
+        if let Some(drag) = self.drag
+            && let Some(lifted_ms) = drag.lifted_ms
+            && now_ms >= lifted_ms + u64::from(self.config.drag_lock_ms)
+        {
+            let _ = out.keys.push((drag.gesture, false));
+            self.reset();
+            return out;
+        }
         if let Some(taps) = self.pending_taps {
             match taps.touch {
                 // The touch after the taps rested: a drag, with whatever it moved.
@@ -554,15 +669,49 @@ impl Recognizer {
         let mut out = Output::default();
         let previous = self.previous;
         self.previous = frame.slots;
+        let previous_ms = self.previous_ms;
+        self.previous_ms = frame.at_ms;
+
+        // A finger touching stops inertia, as on a phone, and isn't a tap.
+        if frame.count > 0 && self.inertia.take().is_some() && self.touch.is_none() && self.drag.is_none() {
+            self.touch = Some(Touch {
+                started_ms: frame.at_ms,
+                acted: true,
+                ..Touch::default()
+            });
+        }
 
         // A hold keeps its key down until no finger is left, and nothing else happens
         // meanwhile.
         if let Some(drag) = &mut self.drag {
-            if frame.count == 0 {
-                let _ = out.keys.push((drag.gesture, false));
-                self.reset();
-            } else {
-                out.cursor(drag.follow(&previous, frame, self.px.decide * 4));
+            match (frame.count, drag.lifted_ms) {
+                (0, Some(_)) => {}
+                (0, None) => {
+                    // A quick still touch after drag lock caught the drag ends it.
+                    let ended = drag.relock.is_some_and(|(started_ms, travel)| {
+                        frame.at_ms.saturating_sub(started_ms) <= u64::from(self.config.tap_ms)
+                            && travel <= self.px.tap_move
+                    });
+                    if self.config.drag_lock_ms > 0 && !ended {
+                        drag.lifted_ms = Some(frame.at_ms);
+                    } else {
+                        let _ = out.keys.push((drag.gesture, false));
+                        self.reset();
+                    }
+                }
+                // A finger back within drag lock: the drag goes on from where it is.
+                (_, Some(_)) => {
+                    drag.lifted_ms = None;
+                    drag.relock = Some((frame.at_ms, 0));
+                    drag.lead = Drag::any_finger(frame);
+                }
+                _ => {
+                    let step = drag.follow(&previous, frame, self.px.decide * 4);
+                    if let Some((_, travel)) = &mut drag.relock {
+                        *travel = travel.saturating_add(len(step));
+                    }
+                    out.cursor(step);
+                }
             }
             return out;
         }
@@ -608,16 +757,32 @@ impl Recognizer {
 
         match frame.count {
             1 => {
-                // Leaving two fingers may end a flick.
+                // Leaving two fingers may end a flick, or start inertia.
                 self.end_two_fingers(frame.at_ms, &mut out);
-                if let Some(i) = frame.slots.iter().position(Option::is_some)
+                // The finger left over from a scroll or zoom doesn't move the cursor.
+                let after_two_fingers = self.touch.is_some_and(|t| t.max_fingers >= 2 && t.acted);
+                if !after_two_fingers
+                    && let Some(i) = frame.slots.iter().position(Option::is_some)
                     && let (Some(now), Some(last)) = (frame.slots[i], previous[i])
                     && previous.iter().flatten().count() == 1
                 {
                     out.cursor(sub(now, last));
                 }
             }
-            2 => self.two_fingers(frame, bound, &mut out),
+            2 => {
+                // The previous frame's time stands in for the last scroll's on the
+                // first one.
+                if !matches!(self.two_finger, TwoFinger::Scrolling { .. }) {
+                    self.scrolled_ms = previous_ms;
+                    self.scroll_velocity = (0, 0);
+                }
+                self.two_fingers(frame, bound, &mut out);
+                if let Some([(Axis::H, h), (Axis::V, v)]) = out.axes {
+                    self.previous_ms = previous_ms;
+                    self.track_scroll((i32::from(h), i32::from(v)), frame.at_ms);
+                    self.previous_ms = frame.at_ms;
+                }
+            }
             _ => {}
         }
         out
@@ -677,6 +842,18 @@ impl Recognizer {
             && dot(average(start, last), dir) >= i64::from(self.px.swipe_along(dir))
         {
             out.tap(gesture);
+        }
+        let start = u32::from(self.px.size.0.max(self.px.size.1)) * INERTIA_START_PERCENT_PER_S / 100;
+        if matches!(self.two_finger, TwoFinger::Scrolling { .. })
+            && self.config.scroll_inertia_ms > 0
+            && at_ms.saturating_sub(self.scrolled_ms) <= 50
+            && len(self.scroll_velocity) >= start
+        {
+            self.inertia = Some(Inertia {
+                velocity: self.scroll_velocity,
+                last_ms: at_ms,
+                rest: (0, 0),
+            });
         }
         self.two_finger = TwoFinger::Idle;
     }
@@ -1263,6 +1440,155 @@ mod tests {
         );
         assert_eq!(keys(&outs[1..2]), tapped(Tap));
         assert_eq!(keys(&outs), tapped(Tap));
+    }
+
+    fn locked(drag_lock_ms: u16) -> TouchGestureConfig {
+        TouchGestureConfig {
+            drag_lock_ms,
+            ..TouchGestureConfig::default()
+        }
+    }
+
+    #[test]
+    fn drag_lock_keeps_a_drag_going_while_the_finger_is_put_back() {
+        let (outs, _) = run_with(
+            locked(300),
+            bound,
+            &[
+                one(0, (100, 100)),
+                lift(80),
+                one(150, (100, 100)),
+                one(160, (200, 100)), // dragging
+                lift(400),            // lifted: still held
+                Step::Timeout(500),
+                one(600, (100, 100)), // back down, elsewhere: no jump
+                one(610, (130, 100)),
+                lift(900),
+                Step::Timeout(1199),
+                Step::Timeout(1200), // nobody came back: released
+            ],
+        );
+        assert_eq!(keys(&outs), tapped(Tap));
+        assert_eq!(keys(&outs[10..11]), vec![(Tap, false)]);
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::X, 100), (Axis::Y, 0)], [(Axis::X, 30), (Axis::Y, 0)]]
+        );
+    }
+
+    #[test]
+    fn a_quick_tap_ends_a_locked_drag_at_once() {
+        let (outs, recognizer) = run_with(
+            locked(300),
+            bound,
+            &[
+                one(0, (100, 100)),
+                lift(80),
+                one(150, (100, 100)),
+                one(160, (200, 100)),
+                lift(400),
+                one(500, (100, 100)),
+                lift(550), // a tap: drop
+            ],
+        );
+        assert_eq!(keys(&outs), tapped(Tap));
+        assert_eq!(keys(&outs[6..7]), vec![(Tap, false)]);
+        assert!(recognizer.drag.is_none());
+    }
+
+    #[test]
+    fn without_drag_lock_lifting_ends_the_drag() {
+        let (outs, _) = run(&[
+            one(0, (100, 100)),
+            lift(80),
+            one(150, (100, 100)),
+            one(160, (200, 100)),
+            lift(400),
+        ]);
+        assert_eq!(keys(&outs[4..5]), vec![(Tap, false)]);
+    }
+
+    fn inertial(scroll_inertia_ms: u16) -> TouchGestureConfig {
+        TouchGestureConfig {
+            scroll_inertia_ms,
+            ..TouchGestureConfig::default()
+        }
+    }
+
+    /// A fast vertical two-finger scroll: 30 every 10 ms, 3000 a second, lifted at 50.
+    fn fling() -> Vec<Step> {
+        vec![
+            two(0, (400, 500), (600, 500)),
+            two(10, (400, 530), (600, 530)), // decided: scrolling
+            two(20, (400, 560), (600, 560)),
+            two(30, (400, 590), (600, 590)),
+            two(40, (400, 620), (600, 620)),
+            lift(50),
+        ]
+    }
+
+    #[test]
+    fn a_fast_scroll_goes_on_and_slows_down_after_lifting() {
+        let mut steps = fling();
+        steps.extend((1..=200).map(|i| Step::Timeout(50 + i * 16)));
+        let (outs, recognizer) = run_with(inertial(300), bound, &steps);
+        let coasting: Vec<i16> = outs[6..].iter().filter_map(|out| out.axes).map(|a| a[1].1).collect();
+        assert!(coasting[0] >= 40, "first step {}", coasting[0]);
+        // Slows down, give or take the fractions carried between steps.
+        assert!(
+            coasting.windows(2).all(|w| w[1] <= w[0] + 1),
+            "slows down: {coasting:?}"
+        );
+        assert!(coasting.last().unwrap() * 10 < coasting[0]);
+        assert!(coasting.iter().all(|v| *v >= 0));
+        assert!(recognizer.inertia.is_none(), "stops by itself");
+    }
+
+    #[test]
+    fn a_touch_stops_inertia_and_isnt_a_tap() {
+        let mut steps = fling();
+        steps.extend([Step::Timeout(66), one(70, (500, 500)), lift(120), Step::Timeout(1000)]);
+        let (outs, recognizer) = run_with(inertial(300), bound, &steps);
+        assert!(recognizer.inertia.is_none());
+        assert!(keys(&outs).is_empty());
+        assert!(outs[8..].iter().all(|out| out.axes.is_none()));
+    }
+
+    #[test]
+    fn a_slow_or_paused_scroll_has_no_inertia() {
+        let (_, recognizer) = run_with(
+            inertial(300),
+            bound,
+            &[
+                two(0, (400, 500), (600, 500)),
+                two(10, (400, 541), (600, 541)),
+                two(110, (400, 545), (600, 545)), // 40 a second
+                lift(120),
+            ],
+        );
+        assert!(recognizer.inertia.is_none());
+        let mut steps = fling();
+        steps.pop();
+        steps.push(lift(300)); // rested before lifting
+        let (_, recognizer) = run_with(inertial(300), bound, &steps);
+        assert!(recognizer.inertia.is_none());
+    }
+
+    #[test]
+    fn without_inertia_a_scroll_stops_on_lifting() {
+        let (_, recognizer) = run(&fling());
+        assert!(recognizer.inertia.is_none());
+    }
+
+    #[test]
+    fn the_finger_left_from_a_scroll_doesnt_move_the_cursor() {
+        let (outs, _) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(10, (400, 540), (600, 540)),
+            one(20, (400, 545)),
+            one(30, (420, 560)),
+        ]);
+        assert!(axes(&outs).iter().all(|a| a[0].0 == Axis::H));
     }
 
     #[test]
