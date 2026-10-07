@@ -563,9 +563,12 @@ pub struct PointingProcessorConfig {
     pub swap_xy: bool,
     /// Acceleration in cursor mode, applied before the cursor multiplier. Off when `None`.
     pub acceleration: Option<PointerAcceleration>,
-    /// Acceleration in scroll mode, applied before the scroll multipliers and divisors.
-    /// Off when `None`.
+    /// Acceleration in scroll mode and of the device's own scrolling, applied before
+    /// the scroll multipliers and divisors. Off when `None`.
     pub scroll_acceleration: Option<PointerAcceleration>,
+    /// Scrolling reported by the device itself on the H/V axes (e.g. a two-finger
+    /// trackpad gesture). It becomes wheel/pan in every mode, after the transforms above.
+    pub device_scroll: ScrollConfig,
 }
 
 impl Default for PointingProcessorConfig {
@@ -577,6 +580,7 @@ impl Default for PointingProcessorConfig {
             swap_xy: false,
             acceleration: None,
             scroll_acceleration: None,
+            device_scroll: ScrollConfig::default(),
         }
     }
 }
@@ -589,6 +593,8 @@ pub struct PointingProcessor<'a> {
     config: PointingProcessorConfig,
     /// Motion accumulator for scroll/sniper modes
     accumulator: MotionAccumulator,
+    /// Accumulator for the device's own H/V scrolling
+    device_scroll_accumulator: MotionAccumulator,
     /// current active mode
     current_mode: PointingMode,
     /// Fractions of a count that acceleration carries to the next event, for the
@@ -606,6 +612,7 @@ impl<'a> PointingProcessor<'a> {
             keymap,
             config,
             accumulator: MotionAccumulator::default(),
+            device_scroll_accumulator: MotionAccumulator::default(),
             current_mode: PointingMode::default(),
             acceleration_rest: (0, 0),
             scroll_acceleration_rest: (0, 0),
@@ -633,11 +640,15 @@ impl<'a> PointingProcessor<'a> {
 
         let mut x = 0i16;
         let mut y = 0i16;
+        let mut h = 0i16;
+        let mut v = 0i16;
 
         for axis_event in event.axes.iter() {
             match axis_event.axis {
                 Axis::X => x = axis_event.value,
                 Axis::Y => y = axis_event.value,
+                Axis::H => h = axis_event.value,
+                Axis::V => v = axis_event.value,
                 _ => {}
             }
         }
@@ -646,19 +657,50 @@ impl<'a> PointingProcessor<'a> {
         // Order: invert → swap → mode invert.
         // Mode-specific invert_x/y operate on the post-swap logical axes,
         // so if swap_xy is enabled, ScrollConfig::invert_y affects the physical X axis.
+        // H and V follow the sensor's X and Y, so they get the same transforms.
         if self.config.invert_x {
             x = -x;
+            h = -h;
         }
         if self.config.invert_y {
             y = -y;
+            v = -v;
         }
         if self.config.swap_xy {
             (x, y) = (y, x);
+            (h, v) = (v, h);
         }
 
         let now = Instant::now();
         let dt_ms = now.saturating_duration_since(self.last_event_at).as_millis();
         self.last_event_at = now;
+
+        if h != 0 || v != 0 {
+            if let Some(acceleration) = self.config.scroll_acceleration {
+                (h, v) = accelerate(h, v, dt_ms, acceleration, &mut self.scroll_acceleration_rest);
+            }
+            let scroll = self.config.device_scroll;
+            let (sh, sv) = self.device_scroll_accumulator.accumulate(
+                h,
+                v,
+                (scroll.multiplier_x, scroll.divisor_x),
+                (scroll.multiplier_y, scroll.divisor_y),
+            );
+            if sh != 0 || sv != 0 {
+                send_hid_report(Report::MouseReport(MouseReport {
+                    buttons: self.keymap.mouse_buttons(),
+                    x: 0,
+                    y: 0,
+                    // Same convention as scroll mode: sensor +V scrolls up unless inverted.
+                    wheel: if scroll.invert_y { sv } else { -sv },
+                    pan: if scroll.invert_x { -sh } else { sh },
+                }))
+                .await;
+            }
+            if x == 0 && y == 0 {
+                return;
+            }
+        }
 
         let buttons = self.keymap.mouse_buttons();
         match self.current_mode {
@@ -1657,6 +1699,62 @@ mod tests {
             accelerate(i16::MAX, i16::MIN, 1, ACCEL, &mut rest),
             (i16::MAX, i16::MIN)
         );
+    }
+
+    // === Device scrolling ===
+
+    #[cfg(not(feature = "_no_usb"))]
+    #[test]
+    fn test_device_scroll_becomes_wheel_and_pan() {
+        use rmk_types::action::KeyAction;
+        use rmk_types::connection::UsbState;
+
+        use crate::channel::USB_REPORT_CHANNEL;
+        use crate::config::{BehaviorConfig, PositionalConfig};
+        use crate::keymap::KeymapData;
+
+        let rel = |axis, value| AxisEvent {
+            typ: AxisValType::Rel,
+            axis,
+            value,
+        };
+        let mouse = |report| match report {
+            Report::MouseReport(m) => (m.x, m.y, m.wheel, m.pan),
+            _ => panic!("expected a mouse report"),
+        };
+
+        block_on(async {
+            crate::state::set_usb_state(UsbState::Configured);
+            USB_REPORT_CHANNEL.clear();
+            let mut behavior = BehaviorConfig::default();
+            let positional: PositionalConfig<1, 1> = PositionalConfig::default();
+            let mut data: KeymapData<1, 1, 1, 0> = KeymapData::new([[[KeyAction::No]]]);
+            let keymap = KeyMap::new(&mut data, &mut behavior, &positional).await;
+            let mut processor = PointingProcessor::new(
+                &keymap,
+                PointingProcessorConfig {
+                    device_scroll: ScrollConfig {
+                        divisor_x: 4,
+                        divisor_y: 4,
+                        ..ScrollConfig::default()
+                    },
+                    ..PointingProcessorConfig::default()
+                },
+            );
+            let scroll = |h, v| PointingEvent {
+                device_id: 0,
+                axes: [rel(Axis::H, h), rel(Axis::V, v), rel(Axis::Z, 0)],
+            };
+
+            // 6 / 4 scrolls one step and keeps 2 for the next event: 2 + 6 = 8, two steps.
+            processor.on_pointing_event(scroll(0, 6)).await;
+            assert_eq!(mouse(USB_REPORT_CHANNEL.try_receive().unwrap()), (0, 0, -1, 0));
+            processor.on_pointing_event(scroll(6, 6)).await;
+            assert_eq!(mouse(USB_REPORT_CHANNEL.try_receive().unwrap()), (0, 0, -2, 1));
+            // Less than a step sends nothing.
+            processor.on_pointing_event(scroll(0, 1)).await;
+            assert!(USB_REPORT_CHANNEL.try_receive().is_err());
+        });
     }
 
     // === Integration tests for PointingProcessor ===
