@@ -205,7 +205,7 @@ fn expand_touch_gesture_config(
     let scroll_both_axes = gestures.scroll_both_axes;
     let decide_percent = gestures.decide_percent.unwrap_or(4);
     let tap_ms = gestures.tap_ms.unwrap_or(200);
-    let tap_drag_ms = gestures.tap_drag_ms.unwrap_or(250);
+    let tap_drag_ms = gestures.tap_drag_ms.unwrap_or(200);
     let multi_finger_tap_ms = gestures.multi_finger_tap_ms.unwrap_or(300);
     let hold_ms = gestures.hold_ms.unwrap_or(300);
     let zoom_cos_permille = cos_permille(gestures.zoom_angle.unwrap_or(25));

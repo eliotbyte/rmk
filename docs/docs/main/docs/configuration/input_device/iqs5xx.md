@@ -76,7 +76,8 @@ name = "trackpad0"
 # natural_scroll = false    # content follows the fingers, as on a phone
 # scroll_both_axes = false  # off: a scroll keeps to the axis it started along
 # tap_ms = 200              # a one-finger tap lifts within this time
-# tap_drag_ms = 250         # a touch starting this soon after a tap drags; 0 turns it off
+# tap_drag_ms = 200         # a touch starting this soon after a tap drags; a tap clicks
+#                           # once this has passed. 0 turns tap drags off, so taps click at once
 # multi_finger_tap_ms = 300 # a two- or three-finger tap lifts within this time
 # hold_ms = 300             # one finger held still this long is a hold
 # decide_percent = 4        # moving this far (in % of the trackpad) is no tap or hold
@@ -101,7 +102,7 @@ touch = [{ tap = "MouseBtn1", two_finger_tap = "MouseBtn2", hold = "MouseBtn1", 
 | Gesture | Recognized when |
 |---|---|
 | `tap`, `two_finger_tap`, `three_finger_tap` | The fingers touch and lift without moving, within `tap_ms` / `multi_finger_tap_ms` |
-| `tap`, held | One finger touches within `tap_drag_ms` of a tap lifting: the tap's action stays pressed until it lifts. Tap, then touch and move drags; two quick taps double-click; tap, tap, touch and move double-clicks and drags. |
+| `tap`, held | One finger touches within `tap_drag_ms` of a tap lifting and moves or rests: the tap becomes a drag, its action pressed until the finger lifts. Tap, then touch and move drags; two quick taps double-click; tap, tap, touch and move double-clicks and drags. A tap waits out `tap_drag_ms` before it clicks. |
 | `hold` | One finger stays still for `hold_ms`. The action stays pressed until every finger lifts, and the fingers move the cursor meanwhile, so `"MouseBtn1"` drags. Another finger can take over when the first runs out of room, during a tap drag too. Leave `hold` out to drag only by tapping first. |
 | `zoom_in`, `zoom_out` | Two fingers move apart / together along the line between them, once per zoom step |
 | `two_finger_swipe_left`, `_right`, `_up`, `_down` | Two fingers flick that way and lift within `swipe_ms`, once per touch |
