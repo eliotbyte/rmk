@@ -108,9 +108,12 @@ touch = [{ tap = "MouseBtn1", two_finger_tap = "MouseBtn2", hold = "MouseBtn1", 
 A gesture with no action on the active layer isn't recognized there at all:
 without `two_finger_swipe_*`, two fingers moving sideways scroll, and without
 `hold`, a finger resting before it moves just moves the cursor. Swipe directions
-are the cursor's, after `proc_invert_*` and `proc_swap_xy`. A layer lists every
-trackpad with gestures or none; one that lists none has no gesture actions, and
-`_` looks through to the layer below as for keys.
+are the cursor's, after `proc_invert_*` and `proc_swap_xy`.
+
+A gesture a layer leaves out is transparent and takes its action from the layer
+below, so usually only the base layer lists `touch`, and a layer above it lists
+just what it changes; `"No"` turns a gesture off there. A layer lists every
+trackpad with gestures or none.
 
 Gesture actions can't be edited from Vial yet.
 

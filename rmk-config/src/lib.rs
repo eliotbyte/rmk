@@ -1419,7 +1419,7 @@ pub struct Iqs5xxConfig {
 }
 
 /// One touchpad's gesture actions on a layer: an entry of `[[keymap.layer]].touch`.
-/// A gesture left out has no action on that layer and isn't recognized there.
+/// A gesture left out is transparent, taking its action from the layer below.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TouchActionsConfig {

@@ -65,8 +65,8 @@ pub(crate) fn expand_default_keymap(keymap: &Keymap, behavior: &Behavior) -> Tok
     }
 }
 
-/// Expand a layer of the touch map: each touchpad's gesture actions, a touchpad the
-/// layer leaves out with none.
+/// Expand a layer of the touch map: each touchpad's gesture actions. A gesture the
+/// layer leaves out is transparent, so layers only list what they change.
 pub(crate) fn expand_touch_layer(
     touchpads: &[TouchActionsConfig],
     num_touchpad: usize,
@@ -80,7 +80,7 @@ pub(crate) fn expand_touch_layer(
             let action = parse_key(action.clone()?, profiles);
             Some(quote! { .with(::rmk::types::action::TouchGesture::#gesture, #action) })
         });
-        quote! { ::rmk::types::action::TouchAction::new() #(#with)* }
+        quote! { ::rmk::types::action::TouchAction::transparent() #(#with)* }
     });
     quote! { [#(#touchpads), *] }
 }

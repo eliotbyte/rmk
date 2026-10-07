@@ -124,7 +124,7 @@ Kp1     Kp2     Kp3        Enter
 # defined in [[input_device.encoder]]. Optional: a layer without `encoders` has no encoder actions
 encoders = [["AudioVolUp", "AudioVolDown"]]
 # Per-layer touchpad gesture actions, one table per trackpad with `gestures` configured.
-# Optional: a layer without `touch` has no gesture actions. See the IQS5xx page
+# Optional: a gesture a layer leaves out takes its action from the layer below. See the IQS5xx page
 # touch = [{ tap = "MouseBtn1", hold = "MouseBtn1", zoom_in = "WM(Equal, LCtrl)" }]
 
 # layer 1:

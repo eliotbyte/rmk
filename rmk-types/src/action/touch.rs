@@ -84,6 +84,13 @@ impl TouchAction {
         }
     }
 
+    /// Every gesture transparent: each takes its action from the layer below.
+    pub const fn transparent() -> Self {
+        Self {
+            actions: [KeyAction::Transparent; TouchGesture::COUNT],
+        }
+    }
+
     /// `self` with `gesture` triggering `action`.
     pub const fn with(mut self, gesture: TouchGesture, action: KeyAction) -> Self {
         self.actions[gesture as usize] = action;
