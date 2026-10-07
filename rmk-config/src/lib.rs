@@ -545,6 +545,7 @@ define_event_config!(
     charging_state,
     // Pointing device events
     pointing,
+    touch,
     // Split events
     peripheral_connected,
     central_connected,

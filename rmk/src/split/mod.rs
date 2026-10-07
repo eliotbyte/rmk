@@ -6,7 +6,7 @@ use serde::{Deserializer, Serializer};
 
 #[cfg(feature = "_ble")]
 use crate::event::BatteryStatusEvent;
-use crate::event::{KeyboardEvent, PointingEvent};
+use crate::event::{KeyboardEvent, PointingEvent, TouchEvent};
 
 #[cfg(feature = "_ble")]
 pub mod ble;
@@ -43,6 +43,8 @@ pub(crate) enum SplitMessage {
     Key(KeyboardEvent),
     /// Pointing device event, from peripheral to central
     Pointing(PointingEvent),
+    /// Touchpad frame, from peripheral to central
+    Touch(TouchEvent),
     /// Led state, on/off, from central to peripheral
     LedState(bool),
     /// `ConnectionStatus` snapshot of the central.

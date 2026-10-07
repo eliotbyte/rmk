@@ -24,7 +24,7 @@ use crate::dfu::{DfuCmd, DfuTarget, SPLIT_RESPONSE_CHANNEL, SplitResponse};
 #[cfg(feature = "dfu_split")]
 use crate::event::DfuCmdEvent;
 use crate::event::{
-    KeyboardEvent, LayerChangeEvent, LedIndicatorEvent, PointingEvent, SleepStateEvent, SubscribableEvent,
+    KeyboardEvent, LayerChangeEvent, LedIndicatorEvent, PointingEvent, SleepStateEvent, SubscribableEvent, TouchEvent,
     publish_event,
 };
 #[cfg(feature = "display")]
@@ -108,6 +108,8 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
         #[cfg(feature = "_ble")]
         let mut charging_state_sub = ChargingStateEvent::subscriber();
         let mut pointing_sub = PointingEvent::subscriber();
+        // Touch frames have no subscriber slot unless a touchpad is configured.
+        let mut touch_sub = (crate::TOUCH_EVENT_SUB_SIZE != 0).then(TouchEvent::subscriber);
         #[cfg(feature = "_ble")]
         let mut battery_sub = BatteryStatusEvent::subscriber();
 
@@ -122,6 +124,13 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         }.into())
                     },
                     e = pointing_sub.next_message_pure().fuse() => SplitMessage::Pointing(e),
+                    e = async {
+                        match touch_sub.as_mut() {
+                            Some(sub) => sub.next_message_pure().await,
+                            None => core::future::pending().await,
+                        }
+                    }
+                    .fuse() => SplitMessage::Touch(e),
                     with_feature("_ble"): e = battery_sub.next_event().fuse() => SplitMessage::BatteryStatus(e),
                 }
             };

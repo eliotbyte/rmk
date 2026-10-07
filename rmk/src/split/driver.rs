@@ -300,6 +300,8 @@ impl<T: SplitReader + SplitWriter> PeripheralManager<T> {
             },
             // Non-key events are drop-on-full to keep the split read loop responsive.
             SplitMessage::Pointing(e) => publish_event(e),
+            // A dropped touch frame could lose the lift that ends a gesture.
+            SplitMessage::Touch(e) => publish_event_async(e).await,
             #[cfg(feature = "_ble")]
             SplitMessage::BatteryStatus(state) => set_peripheral_battery(self.id, state.0),
             #[cfg(feature = "dfu_split")]

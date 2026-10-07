@@ -557,7 +557,10 @@ impl<'a, 'b, 'c, C: Controller + ControllerCmdAsync<LeSetPhy>, P: PacketPool> Sp
         debug!("Received split message: {:?}", message);
 
         // Key events from the peripheral count as activity for sleep management
-        if matches!(message, SplitMessage::Key(_) | SplitMessage::Pointing(_)) {
+        if matches!(
+            message,
+            SplitMessage::Key(_) | SplitMessage::Pointing(_) | SplitMessage::Touch(_)
+        ) {
             report_activity();
         }
 

@@ -167,6 +167,41 @@ pub enum Axis {
     // .. More is allowed
 }
 
+/// Fingers a [`TouchEvent`] carries. Gestures use up to three; more fingers are
+/// only counted.
+pub const TOUCH_MAX_FINGERS: usize = 3;
+
+/// One frame of a multi-touch device such as a trackpad: where each finger is.
+///
+/// A touchpad publishes one per scan while a finger touches, and one with no
+/// fingers when the last lifts. Gesture recognition runs on these, on the central
+/// for a touchpad on a split peripheral.
+#[event(
+    channel_size = crate::TOUCH_EVENT_CHANNEL_SIZE,
+    pubs = crate::TOUCH_EVENT_PUB_SIZE,
+    subs = crate::TOUCH_EVENT_SUB_SIZE
+)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, MaxSize, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct TouchEvent {
+    /// The id of the pointing device that produced this frame.
+    pub device_id: u8,
+    /// The touch area's width and height, in the units of the positions.
+    pub size: (u16, u16),
+    /// How many fingers touch, which may be more than `fingers` holds.
+    pub count: u8,
+    /// Finger positions by slot. A finger keeps its slot while others land or lift.
+    pub fingers: [Option<TouchPoint>; TOUCH_MAX_FINGERS],
+}
+
+/// A finger's position on a touchpad, from its top-left corner.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, MaxSize, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct TouchPoint {
+    pub x: u16,
+    pub y: u16,
+}
+
 /// Set the CPI (Resolution) of the pointing device
 /// TODO: Make the channel size configurable
 #[event(channel_size = 8, pubs = 2, subs = 2)]
