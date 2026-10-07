@@ -82,7 +82,7 @@ pub struct TouchGestureConfig {
     /// One finger held still this many milliseconds is a hold.
     pub hold_ms: u16,
     /// A zoom needs both fingers moving in opposite directions along the line between
-    /// them, within this angle; it's `cos(angle)` in permille (25° is 906).
+    /// them, on average within this angle; it's `cos(angle)` in permille (25° is 906).
     pub zoom_cos_permille: u16,
     /// How much the distance between the fingers changes per zoom step, in percent of
     /// the touchpad's longer side.
@@ -381,8 +381,9 @@ enum TwoFinger {
         axis: ScrollAxis,
     },
     /// Only one of the two fingers moves: it moves the cursor, from `last`. Until
-    /// `SCROLL_JOIN_MS` after the second finger landed at `started_ms`, the other
-    /// following it from `from` still makes it a scroll.
+    /// `JOIN_MS` after the second finger landed at `started_ms`, the other setting
+    /// off from `from` still makes it a scroll if it follows, or a zoom if it goes the
+    /// other way along the line between them.
     Pointing {
         finger: usize,
         last: Point,
@@ -417,8 +418,8 @@ enum ThreeFinger {
 }
 
 /// How long after a second finger lands it can still join the moving one for a
-/// scroll: a scroll often starts with one finger, the second put down on the way.
-const SCROLL_JOIN_MS: u64 = 300;
+/// scroll or zoom: these often start with one finger, the second put down on the way.
+const JOIN_MS: u64 = 300;
 
 /// How long after a finger lands or lifts beside another the touchpad may still
 /// report one point between them, gliding there and back.
@@ -1132,13 +1133,26 @@ impl Recognizer {
                 // The other finger set off the same way soon after landing: a scroll that
                 // started with one finger.
                 if self.config.scroll
-                    && frame.at_ms.saturating_sub(started_ms) <= SCROLL_JOIN_MS
+                    && frame.at_ms.saturating_sub(started_ms) <= JOIN_MS
                     && len(joined) >= self.px.decide
                     && within_angle(moved, joined, 707, false)
                 {
                     TwoFinger::Scrolling {
                         last: now,
                         axis: scroll_axis(joined),
+                    }
+                } else if zoom
+                    && frame.at_ms.saturating_sub(started_ms) <= JOIN_MS
+                    && len(joined) >= self.px.decide / 2
+                    && [false, true].into_iter().any(|pinch| {
+                        // Spreading, the other finger moves on away from the moving one,
+                        // and the moving one away from it; pinching, the other way.
+                        let towards = sub(from[other], from[finger]);
+                        within_angle(joined, towards, 707, pinch) && within_angle(moved, towards, 707, !pinch)
+                    })
+                {
+                    TwoFinger::Zooming {
+                        base: len(sub(now[1], now[0])),
                     }
                 } else {
                     out.cursor(sub(now[finger], last));
@@ -1229,14 +1243,16 @@ fn classify(
     if travel < px.decide {
         return None;
     }
+    // Fingers spreading or pinching move along arcs, so it is their motion together
+    // that has to change the distance between them: by as much as moving within the
+    // angle along the line between them would.
     let axis = sub(start[1], start[0]);
-    let cos = u32::from(config.zoom_cos_permille.min(1000));
+    let spread = (dot(d2, axis) - dot(d1, axis)) / i64::from(len(axis).max(1));
+    let cos = u64::from(config.zoom_cos_permille.min(1000));
     if zoom
         && len(d1) >= px.decide / 4
         && len(d2) >= px.decide / 4
-        && within_angle(d1, d2, cos, true)
-        && (within_angle(d1, axis, cos, false) || within_angle(d1, axis, cos, true))
-        && (within_angle(d2, axis, cos, false) || within_angle(d2, axis, cos, true))
+        && spread.unsigned_abs() * 1000 >= u64::from(travel) * cos
     {
         return Some(TwoFingerKind::Zoom);
     }
@@ -2155,13 +2171,29 @@ mod tests {
         assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { finger: 1, .. }));
     }
 
+    /// Runs frames of up to two fingers from a recording on a TPS43 (1792 by 2048).
+    fn replay(frames: &[(u64, Option<Point>, Option<Point>)]) -> Vec<Output> {
+        let mut recognizer = Recognizer::new(TouchGestureConfig::default());
+        frames
+            .iter()
+            .map(|&(at_ms, a, b)| {
+                let frame = Frame {
+                    count: [a, b].iter().flatten().count() as u8,
+                    slots: [a, b, None],
+                    strength: 1500,
+                    at_ms,
+                };
+                recognizer.frame(&frame, (1792, 2048), &bound)
+            })
+            .collect()
+    }
+
     #[test]
     fn the_point_gliding_between_two_fingers_as_one_lands_or_lifts_is_no_cursor_motion() {
         // From a recording on a TPS43 (2048 tall): one finger rests, a second one
         // lifts, lands again and lifts. Each time the touchpad's one point glided
         // about 150 a frame toward the other finger and back, and the cursor with it;
         // the last time without the finger count changing on the way back.
-        let mut recognizer = Recognizer::new(TouchGestureConfig::default());
         let frames = [
             (289791, Some((1155, 694)), None),
             (289828, Some((1155, 695)), None),
@@ -2182,22 +2214,13 @@ mod tests {
             (291943, Some((1144, 672)), None),
             (291958, Some((1144, 671)), None),
         ];
-        let mut steps = Vec::new();
-        for (at_ms, a, b) in frames {
-            let out = recognizer.frame(
-                &Frame {
-                    count: [a, b].iter().flatten().count() as u8,
-                    slots: [a, b, None],
-                    strength: 1500,
-                    at_ms,
-                },
-                (1792, 2048),
-                &|_| true,
-            );
-            if let Some([(Axis::X, x), (Axis::Y, y)]) = out.axes {
-                steps.push((x, y));
-            }
-        }
+        let steps: Vec<_> = replay(&frames)
+            .iter()
+            .filter_map(|out| match out.axes {
+                Some([(Axis::X, x), (Axis::Y, y)]) => Some((x, y)),
+                _ => None,
+            })
+            .collect();
         assert!(steps.iter().all(|&(x, y)| x.abs() + y.abs() < 40), "{steps:?}");
     }
 
@@ -2253,6 +2276,69 @@ mod tests {
             two(20, (340, 500), (660, 500)), // 320: short of the next at 280
         ]);
         assert_eq!(keys(&outs), tapped(ZoomOut));
+    }
+
+    #[test]
+    fn fingers_spreading_along_arcs_zoom() {
+        // From a recording on a TPS43: one finger moved about 28° off the line
+        // between them, more than the 25° each finger used to need.
+        let outs = replay(&[
+            (1037249, Some((1611, 1105)), Some((830, 1674))),
+            (1037256, Some((1615, 1099)), Some((830, 1674))),
+            (1037271, Some((1619, 1092)), Some((827, 1676))),
+            (1037286, Some((1624, 1082)), Some((821, 1680))),
+            (1037294, Some((1629, 1070)), Some((807, 1690))),
+            (1037309, Some((1634, 1060)), Some((785, 1706))),
+            (1037316, Some((1637, 1051)), Some((760, 1724))),
+            (1037331, Some((1640, 1043)), Some((734, 1743))),
+            (1037346, Some((1644, 1034)), Some((702, 1768))),
+            (1037354, Some((1649, 1023)), Some((669, 1795))),
+            (1037369, Some((1654, 1013)), Some((645, 1815))),
+        ]);
+        assert_eq!(keys(&outs), [tapped(ZoomIn), tapped(ZoomIn)].concat());
+    }
+
+    #[test]
+    fn a_zoom_can_start_with_one_finger_the_second_joining() {
+        // From a recording on a TPS43: the first finger moves on as the second lands
+        // and rests, so it moves the cursor, until the second sets off the other way.
+        let outs = replay(&[
+            (1035568, Some((1510, 1090)), None),
+            (1035576, Some((1513, 1082)), Some((654, 1786))),
+            (1035591, Some((1517, 1072)), Some((654, 1786))),
+            (1035599, Some((1532, 1049)), Some((654, 1786))),
+            (1035614, Some((1552, 1021)), Some((654, 1786))),
+            (1035637, Some((1571, 996)), Some((654, 1786))),
+            (1035638, Some((1585, 973)), Some((655, 1785))),
+            (1035658, Some((1597, 954)), Some((656, 1784))),
+            (1035660, Some((1610, 932)), Some((655, 1784))),
+            (1035674, Some((1623, 906)), Some((654, 1784))),
+            (1035696, Some((1637, 877)), Some((650, 1785))),
+            (1035698, Some((1650, 845)), Some((645, 1787))),
+            (1035711, Some((1663, 805)), Some((638, 1789))),
+            (1035719, Some((1674, 766)), Some((631, 1791))),
+            (1035734, Some((1682, 739)), Some((622, 1794))),
+            (1035749, Some((1687, 723)), Some((610, 1795))),
+            (1035756, Some((1690, 714)), Some((595, 1799))),
+            (1035772, Some((1692, 708)), Some((574, 1807))),
+            (1035794, Some((1693, 704)), Some((553, 1816))),
+            (1035796, Some((1695, 701)), Some((526, 1828))),
+            (1035809, Some((1696, 699)), Some((499, 1840))),
+            (1035816, Some((1697, 696)), Some((482, 1849))),
+            (1035831, Some((1698, 694)), Some((468, 1855))),
+        ]);
+        assert_eq!(keys(&outs), tapped(ZoomIn));
+    }
+
+    #[test]
+    fn a_resting_finger_moving_across_the_line_doesnt_turn_pointing_into_a_zoom() {
+        let (outs, recognizer) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(10, (400, 500), (650, 500)), // the second finger moves the cursor
+            two(20, (400, 540), (700, 500)), // and the first sets off across
+        ]);
+        assert!(keys(&outs).is_empty());
+        assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { finger: 1, .. }));
     }
 
     #[test]

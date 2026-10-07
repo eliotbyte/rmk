@@ -1541,7 +1541,7 @@ pub struct TouchGesturesConfig {
     /// One finger held still this many milliseconds is a hold. Defaults to 300.
     pub hold_ms: Option<u16>,
     /// A zoom needs both fingers moving in opposite directions along the line between
-    /// them, within this many degrees. Lower is stricter. Defaults to 25.
+    /// them, on average within this many degrees. Lower is stricter. Defaults to 25.
     pub zoom_angle: Option<u8>,
     /// How much the distance between the fingers changes per zoom step, in percent of
     /// the touchpad's longer side. Defaults to 6.
