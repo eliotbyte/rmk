@@ -75,9 +75,9 @@ name = "trackpad0"
 # scroll_divisor = 8        # trackpad movement per scroll step; larger scrolls slower
 # natural_scroll = false    # content follows the fingers, as on a phone
 # scroll_both_axes = false  # off: a scroll keeps to the axis it started along
-# tap_ms = 200              # a one-finger tap lifts within this time
-# tap_move_percent = 2      # and moves at most this far (in % of the trackpad); more is a cursor move
-# tap_drag_ms = 200         # a touch starting this soon after a tap drags; a tap clicks
+# tap_ms = 180              # a one-finger tap lifts within this time
+# tap_move_percent = 3      # and moves at most this far (in % of the trackpad); more is a cursor move
+# tap_drag_ms = 180         # a touch starting this soon after a tap drags; a tap clicks
 #                           # once this has passed. 0 turns tap drags off, so taps click at once
 # tap_drag_distance_percent = 8 # and only if it lands this close to the tap
 # multi_finger_tap_ms = 300 # a two- or three-finger tap lifts within this time

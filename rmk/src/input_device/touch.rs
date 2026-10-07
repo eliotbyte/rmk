@@ -113,9 +113,9 @@ impl Default for TouchGestureConfig {
             scroll: true,
             scroll_both_axes: false,
             decide_percent: 4,
-            tap_ms: 200,
-            tap_move_percent: 2,
-            tap_drag_ms: 200,
+            tap_ms: 180,
+            tap_move_percent: 3,
+            tap_drag_ms: 180,
             tap_drag_distance_percent: 8,
             multi_finger_tap_ms: 300,
             hold_ms: 300,
@@ -549,20 +549,14 @@ impl Recognizer {
         let taps = self.pending_taps?;
         match taps.touch {
             Some((started_ms, held)) => match frame.count {
-                // Lifted before it rested: another tap if it stayed put, a cursor move
-                // otherwise.
+                // Lifted before it moved or rested: another tap.
                 0 => {
-                    if len(held) <= self.px.tap_move {
-                        self.pending_taps = Some(PendingTaps {
-                            count: (taps.count + 1).min(MAX_PENDING_TAPS),
-                            lifted_ms: frame.at_ms,
-                            touch: None,
-                            ..taps
-                        });
-                    } else {
-                        self.flush_taps(out);
-                        out.cursor(held);
-                    }
+                    self.pending_taps = Some(PendingTaps {
+                        count: (taps.count + 1).min(MAX_PENDING_TAPS),
+                        lifted_ms: frame.at_ms,
+                        touch: None,
+                        ..taps
+                    });
                     self.reset();
                 }
                 1 => {
@@ -572,7 +566,8 @@ impl Recognizer {
                         None => (0, 0),
                     };
                     let held = (held.0 + step.0, held.1 + step.1);
-                    if len(held) > self.px.decide {
+                    // Moving further than a tap may is a drag, as in libinput.
+                    if len(held) > self.px.tap_move {
                         self.start_tap_drag(lead, out);
                         out.cursor(held);
                     } else {
@@ -1282,10 +1277,10 @@ mod tests {
 
     #[test]
     fn a_tap_clicks_once_the_tap_drag_window_passes() {
-        let (outs, recognizer) = run(&[one(0, (100, 100)), lift(80), Step::Timeout(279)]);
+        let (outs, recognizer) = run(&[one(0, (100, 100)), lift(80), Step::Timeout(259)]);
         assert!(keys(&outs).is_empty());
-        assert_eq!(recognizer.deadline(), Some(280));
-        let (outs, _) = run(&[one(0, (100, 100)), lift(80), Step::Timeout(280)]);
+        assert_eq!(recognizer.deadline(), Some(260));
+        let (outs, _) = run(&[one(0, (100, 100)), lift(80), Step::Timeout(260)]);
         assert_eq!(keys(&outs), tapped(Tap));
     }
 
@@ -1394,10 +1389,10 @@ mod tests {
 
     #[test]
     fn a_short_touch_that_moves_is_a_cursor_move_not_a_tap() {
-        // 30 is past the 20 a tap may move, though short of the 40 that decides gestures.
-        let (outs, _) = run(&[one(0, (100, 100)), one(20, (130, 100)), lift(60), Step::Timeout(500)]);
+        // 35 is past the 30 a tap may move, though short of the 40 that decides gestures.
+        let (outs, _) = run(&[one(0, (100, 100)), one(20, (135, 100)), lift(60), Step::Timeout(500)]);
         assert!(keys(&outs).is_empty());
-        assert_eq!(axes(&outs), vec![[(Axis::X, 30), (Axis::Y, 0)]]);
+        assert_eq!(axes(&outs), vec![[(Axis::X, 35), (Axis::Y, 0)]]);
     }
 
     #[test]
@@ -1411,20 +1406,6 @@ mod tests {
         assert_eq!(keys(&outs[2..3]), tapped(Tap));
         assert_eq!(axes(&outs), vec![[(Axis::X, 10), (Axis::Y, 0)]]);
         assert!(recognizer.pending_taps.is_none() && recognizer.drag.is_none());
-    }
-
-    #[test]
-    fn a_quick_moving_touch_after_a_tap_clicks_once_and_moves() {
-        let (outs, _) = run(&[
-            one(0, (100, 100)),
-            lift(80),
-            one(150, (110, 100)),
-            one(160, (140, 100)), // 30: more than a tap moves, less than a drag needs
-            lift(200),
-            Step::Timeout(600),
-        ]);
-        assert_eq!(keys(&outs), tapped(Tap));
-        assert_eq!(axes(&outs), vec![[(Axis::X, 30), (Axis::Y, 0)]]);
     }
 
     #[test]

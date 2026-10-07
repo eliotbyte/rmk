@@ -1514,10 +1514,12 @@ pub struct TouchGesturesConfig {
     /// touch no tap or hold, and decides between a two-finger scroll and zoom.
     /// Defaults to 4.
     pub decide_percent: Option<u8>,
-    /// A one-finger tap lifts within this many milliseconds. Defaults to 200.
+    /// A one-finger tap lifts within this many milliseconds. Defaults to 180, as in
+    /// libinput.
     pub tap_ms: Option<u16>,
     /// A one-finger tap moves at most this far, in percent of the touchpad's longer
-    /// side; more is a cursor move. Defaults to 2.
+    /// side; more is a cursor move, or a drag on the touch after a tap. Defaults to 3,
+    /// about libinput's 1.3 mm on a 43 mm trackpad.
     pub tap_move_percent: Option<u8>,
     /// The touch after a tap only drags, or taps again, if it lands within this
     /// distance of the tap, in percent of the touchpad's longer side. Defaults to 8.
@@ -1525,7 +1527,7 @@ pub struct TouchGesturesConfig {
     /// A one-finger touch starting within this many milliseconds of a tap turns the
     /// tap into a drag, holding its action until the touch lifts: tap, then touch and
     /// move drags. A tap clicks only once this has passed; 0 turns tap drags off, so
-    /// taps click at once. Defaults to 200.
+    /// taps click at once. Defaults to 180, as in libinput.
     pub tap_drag_ms: Option<u16>,
     /// A two- or three-finger tap lifts within this many milliseconds. Defaults to 300.
     pub multi_finger_tap_ms: Option<u16>,
