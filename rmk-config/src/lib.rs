@@ -1411,7 +1411,8 @@ pub struct Iqs5xxConfig {
     pub proc_swap_xy: bool,
     /// Cursor acceleration in the PointingProcessor. Off unless configured.
     pub proc_acceleration: Option<PointingAccelerationConfig>,
-    /// Scroll-mode acceleration in the PointingProcessor. Off unless configured.
+    /// Acceleration of scroll mode and two-finger scrolling in the PointingProcessor.
+    /// Off unless configured.
     pub proc_scroll_acceleration: Option<PointingAccelerationConfig>,
     /// Gestures. Off unless configured.
     pub gestures: Option<TouchGesturesConfig>,

@@ -8,11 +8,10 @@ trackpad modules.
 
 - `keyboard.toml` configuration is supported on nRF52 and RP2040 only; other chips
   need the [Rust API](#rust-configuration).
-- Currently only relative single-finger cursor movement is reported. Gestures,
-  multi-finger absolute positions, pressure, area, and raw channel data are
-  read from the IC but not yet published as RMK events.
-- Scaling is not supported yet; cursor movements will likely feel fast and
-  imprecise.
+- Without [gestures](#gestures), only relative single-finger cursor movement
+  is reported. With them, the first three fingers' positions are, and RMK
+  recognizes taps, a hold that drags, two-finger scrolling, pinch zoom and
+  swipes from them. Pressure, area, and raw channel data are not read.
 - An `RDY` (ready) pin is strongly recommended. Without it, the driver falls
   back to timed polling and may stall the I²C bus through clock-stretching if
   it polls mid-cycle. See [RDY vs polling](#rdy-vs-polling).
@@ -57,9 +56,63 @@ rdy = "PIN_15"
 # `max` percent. Slower motion passes unchanged. Counts depend on the sensor's
 # resolution, so retune `from` after changing it.
 # proc_acceleration = { from = 1500, max = 250 }
-# The same for scroll mode, applied before the scroll divisor.
+# The same for scroll mode and two-finger scrolling, applied before the scroll divisor.
 # proc_scroll_acceleration = { from = 1500, max = 300 }
 ```
+
+## Gestures
+
+Add a `gestures` table to a trackpad to turn gestures on for it:
+
+```toml
+[[input_device.iqs5xx]]
+name = "trackpad0"
+# ...
+
+[input_device.iqs5xx.gestures]
+# Every setting is optional; these are the defaults.
+# scroll = true             # two-finger scrolling
+# scroll_divisor = 8        # trackpad movement per scroll step; larger scrolls slower
+# natural_scroll = false    # content follows the fingers, as on a phone
+# scroll_both_axes = false  # off: a scroll keeps to the axis it started along
+# tap_ms = 200              # a one-finger tap lifts within this time
+# multi_finger_tap_ms = 300 # a two- or three-finger tap lifts within this time
+# hold_ms = 300             # one finger held still this long is a hold
+# decide_percent = 4        # moving this far (in % of the trackpad) is no tap or hold
+# zoom_angle = 25           # degrees a pinch may stray from the line between the fingers
+# zoom_step_percent = 6     # finger distance change per zoom step
+# swipe_percent = 10        # how far two fingers flick for a swipe
+# swipe_ms = 250            # a two-finger flick lifts within this time; longer scrolls
+# swipe_angle = 30          # degrees a swipe may stray from its direction
+# three_finger_swipe_percent = 15
+```
+
+What each gesture does is set per layer in `[[keymap.layer]]`, like encoders,
+with one table per trackpad that has gestures — the central's first, then each
+peripheral's. Each action takes the same syntax as a key in `keys`:
+
+```toml
+[[keymap.layer]]
+keys = "..."
+touch = [{ tap = "MouseBtn1", two_finger_tap = "MouseBtn2", hold = "MouseBtn1", zoom_in = "WM(Equal, LCtrl)", zoom_out = "WM(Minus, LCtrl)" }]
+```
+
+| Gesture | Recognized when |
+|---|---|
+| `tap`, `two_finger_tap`, `three_finger_tap` | The fingers touch and lift without moving, within `tap_ms` / `multi_finger_tap_ms` |
+| `hold` | One finger stays still for `hold_ms`. The action stays pressed until every finger lifts, and the fingers move the cursor meanwhile, so `"MouseBtn1"` drags. Another finger can take over when the first runs out of room. |
+| `zoom_in`, `zoom_out` | Two fingers move apart / together along the line between them, once per zoom step |
+| `two_finger_swipe_left`, `_right`, `_up`, `_down` | Two fingers flick that way and lift within `swipe_ms`, once per touch |
+| `three_finger_swipe_left`, `_right`, `_up`, `_down` | Three fingers move that way, once per touch |
+
+A gesture with no action on the active layer isn't recognized there at all:
+without `two_finger_swipe_*`, two fingers moving sideways scroll, and without
+`hold`, a finger resting before it moves just moves the cursor. Swipe directions
+are the cursor's, after `proc_invert_*` and `proc_swap_xy`. A layer lists every
+trackpad with gestures or none; one that lists none has no gesture actions, and
+`_` looks through to the layer below as for keys.
+
+Gesture actions can't be edited from Vial yet.
 
 ### Split
 
@@ -75,7 +128,9 @@ name = ...
 ```
 
 For split keyboards the device runs on whichever side it's wired to; the
-matching `PointingProcessor` is generated on the central automatically.
+matching `PointingProcessor`, and the `TouchGestureProcessor` of a trackpad with
+gestures, are generated on the central automatically. A peripheral forwards its
+trackpad's finger positions to the central, which recognizes the gestures.
 
 ## Rust configuration
 
@@ -126,6 +181,52 @@ You can switch between Cursor, Scroll, Sniper and Caret modes per layer.
 See the [PointingProcessor](./pointing_processor) page for all options.
 
 :::
+
+### Gestures in Rust
+
+Have the trackpad publish finger positions, and add a `TouchGestureProcessor`
+on the central next to its `PointingProcessor`. Gesture actions go in the keymap
+data's touch map, one `TouchAction` per trackpad and layer:
+
+```rust
+use rmk::input_device::touch::{TouchGestureConfig, TouchGestureProcessor};
+use rmk::types::action::{TouchAction, TouchGesture};
+
+let mut keymap_data = KeymapData::new_with_touch(
+    keymap,
+    [[]; NUM_LAYER], // or the encoder map
+    [[TouchAction::new()
+        .with(TouchGesture::Tap, k!(MouseBtn1))
+        .with(TouchGesture::Hold, k!(MouseBtn1))]; NUM_LAYER],
+);
+
+let mut trackpad = Iqs5xx::new(POINTING_DEV_ID, i2c, rdy).with_touch_frames();
+let mut trackpad_touch = TouchGestureProcessor::new(
+    &keymap,
+    TouchGestureConfig {
+        device_id: POINTING_DEV_ID,
+        touchpad_id: 0, // its index in the touch map
+        ..Default::default()
+    },
+);
+// Two-finger scrolling arrives on the H/V axes; `device_scroll` sets its speed.
+let mut trackpad_proc = PointingProcessor::new(&keymap, PointingProcessorConfig {
+    device_id: POINTING_DEV_ID,
+    ..Default::default()
+});
+
+run_all!(trackpad, trackpad_touch, trackpad_proc, /* matrix, ... */);
+```
+
+Finger positions travel as `TouchEvent`s, which have no subscriber unless
+`keyboard.toml` configures a trackpad with gestures. Without one, reserve a
+subscriber per `TouchGestureProcessor`, plus one on a split keyboard for the
+peripheral that forwards them:
+
+```toml
+[event.touch]
+subs = 2
+```
 
 ## RDY vs polling
 
