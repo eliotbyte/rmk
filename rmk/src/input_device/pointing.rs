@@ -615,6 +615,11 @@ impl<'a> PointingProcessor<'a> {
 
     /// Set the pointing mode
     pub fn set_pointing_mode(&mut self, mode: PointingMode) -> &mut Self {
+        if self.current_mode != mode {
+            self.accumulator.reset();
+            self.acceleration_rest = (0, 0);
+            self.scroll_acceleration_rest = (0, 0);
+        }
         self.current_mode = mode;
         self
     }
@@ -1660,6 +1665,61 @@ mod tests {
     }
 
     // === Integration tests for PointingProcessor ===
+
+    #[cfg(not(feature = "_no_usb"))]
+    #[test]
+    fn mode_changes_do_not_replay_previous_motion() {
+        block_on(async {
+            let mut data = crate::keymap::KeymapData::new([[[rmk_types::action::KeyAction::No]]]);
+            let mut behavior = crate::config::BehaviorConfig::default();
+            let positional = crate::config::PositionalConfig::<1, 1>::default();
+            let keymap = KeyMap::new(&mut data, &mut behavior, &positional).await;
+            crate::state::set_usb_state(rmk_types::connection::UsbState::Configured);
+            let reports = &crate::channel::USB_REPORT_CHANNEL;
+            let fractional_cursor = PointingMode::Cursor(CursorConfig {
+                divisor_x: 8,
+                divisor_y: 8,
+                ..Default::default()
+            });
+            let cursor = PointingMode::Cursor(CursorConfig::default());
+            for (mode, next_mode, next_delta) in [
+                PointingMode::Scroll(ScrollConfig::default()),
+                PointingMode::Sniper(SniperConfig::default()),
+                PointingMode::Caret(CaretConfig::default()),
+                fractional_cursor,
+            ]
+            .map(|mode| (mode, cursor, 1))
+            .into_iter()
+            .chain([(fractional_cursor, fractional_cursor, 5)])
+            {
+                let mut processor = PointingProcessor::new(&keymap, PointingProcessorConfig::default());
+                for (mode, delta) in [(mode, 3), (next_mode, next_delta)] {
+                    processor
+                        .on_pointing_processor_event(PointingProcessorEvent { device_id: 0, mode })
+                        .await;
+                    processor
+                        .on_pointing_event(PointingEvent {
+                            device_id: 0,
+                            axes: [Axis::X, Axis::Y, Axis::Z].map(|axis| AxisEvent {
+                                typ: AxisValType::Rel,
+                                axis,
+                                value: match axis {
+                                    Axis::X => delta,
+                                    Axis::Y => -delta,
+                                    _ => 0,
+                                },
+                            }),
+                        })
+                        .await;
+                }
+                let Report::MouseReport(report) = reports.try_receive().unwrap() else {
+                    panic!("mouse report")
+                };
+                assert_eq!((report.x, report.y, report.wheel, report.pan), (1, -1, 0, 0));
+                assert!(reports.try_receive().is_err());
+            }
+        });
+    }
 
     #[test]
     fn test_pointing_processor_mode_selection() {
