@@ -104,8 +104,6 @@ To change modes when a layer or key changes, create a controller that receives t
 
 Add the following module to your project. It selects Cursor on layer 0, Sniper on layer 1, Scroll on layer 2, and Caret on layer 3. Pressing a key bound to `User0` also selects Caret.
 
-The example uses `device_id = 255` with the default pointing processor. If your processor is configured for a specific device ID, use that same ID in these events.
-
 ::: note
 
 Reserve a subscriber slot for `ActionEvent` in `keyboard.toml`. Its default subscriber count is zero:
