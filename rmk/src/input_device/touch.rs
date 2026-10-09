@@ -267,11 +267,12 @@ enum ScrollAxis {
 enum TwoFinger {
     #[default]
     Idle,
-    /// Two fingers down at `start`, not moved far enough to tell.
+    /// Two fingers down at `start` since `started_ms`, not moved far enough to tell.
     /// While one of them rests, the other's motion already moves the cursor, from
     /// `last`; `sent` is how much of each finger's motion went out that way.
     Deciding {
         start: [Point; 2],
+        started_ms: u64,
         last: [Point; 2],
         sent: [Point; 2],
     },
@@ -280,12 +281,24 @@ enum TwoFinger {
         axis: ScrollAxis,
     },
     /// Only one of the two fingers moves: it moves the cursor. `last` is where both
-    /// were on the last frame.
+    /// were on the last frame. Until `JOIN_MS` after the second finger landed at
+    /// `started_ms`, the other setting off from `from` still makes it a scroll if it
+    /// follows.
     Pointing {
         finger: usize,
         last: [Point; 2],
+        started_ms: u64,
+        from: [Point; 2],
     },
 }
+
+/// How long after a second finger lands it can still join the moving one for a
+/// scroll: these often start with one finger, the second put down on the way.
+const JOIN_MS: u64 = 300;
+
+/// How long after a finger lands or lifts beside another the touchpad may still
+/// report one point between them, gliding there and back.
+const GLIDE_MS: u64 = 50;
 
 /// Gesture recognition, apart from the event plumbing so it can be tested on its own.
 #[derive(Debug)]
@@ -297,6 +310,10 @@ struct Recognizer {
     previous: [Option<Point>; TOUCH_MAX_FINGERS],
     drag: Option<Drag>,
     pending_taps: Option<PendingTaps>,
+    /// How far each slot's glides moved it off its finger, taken off its position
+    /// until the finger lifts; and when the number of fingers last changed.
+    glide: [Point; TOUCH_MAX_FINGERS],
+    count_changed_ms: Option<u64>,
     two_finger: TwoFinger,
 }
 
@@ -309,8 +326,40 @@ impl Recognizer {
             previous: [None; TOUCH_MAX_FINGERS],
             drag: None,
             pending_taps: None,
+            glide: [(0, 0); TOUCH_MAX_FINGERS],
+            count_changed_ms: None,
             two_finger: TwoFinger::Idle,
         }
+    }
+
+    /// `frame` without the touchpad's glides. Right after a finger lands or lifts
+    /// beside another, the touchpad reports one point between the two for a few
+    /// frames, which glides there and back. No finger moves that far that soon, so a
+    /// step longer than `decide` then is a glide, not motion.
+    fn unglide(&mut self, mut frame: Frame) -> Frame {
+        let counts = [frame.slots, self.previous].map(|slots| slots.iter().flatten().count());
+        if counts[0] != counts[1] && counts[0].min(counts[1]) >= 1 {
+            self.count_changed_ms = Some(frame.at_ms);
+        }
+        let gliding = self
+            .count_changed_ms
+            .is_some_and(|changed_ms| frame.at_ms.saturating_sub(changed_ms) <= GLIDE_MS);
+        for ((slot, glide), last) in frame.slots.iter_mut().zip(&mut self.glide).zip(self.previous) {
+            let Some(now) = slot else {
+                *glide = (0, 0);
+                continue;
+            };
+            *now = sub(*now, *glide);
+            if let Some(last) = last
+                && gliding
+                && len(sub(*now, last)) > self.px.decide
+            {
+                let step = sub(*now, last);
+                *glide = (glide.0 + step.0, glide.1 + step.1);
+                *now = last;
+            }
+        }
+        frame
     }
 
     /// When something happens without a frame: a touch after a tap resting long
@@ -434,6 +483,7 @@ impl Recognizer {
         if self.px.size != size {
             self.px = Px::new(&self.config, size);
         }
+        let frame = &self.unglide(*frame);
         let mut out = Output::default();
         let previous = self.previous;
         self.previous = frame.slots;
@@ -502,6 +552,9 @@ impl Recognizer {
         }
 
         match frame.count {
+            // A scroll pauses while one of its fingers is lifted, to go on when it is
+            // put back.
+            1 if matches!(self.two_finger, TwoFinger::Scrolling { .. }) => {}
             1 => {
                 self.two_finger = TwoFinger::Idle;
                 // The finger left over from a scroll doesn't move the cursor.
@@ -515,7 +568,17 @@ impl Recognizer {
                     out.cursor(sub(now, last));
                 }
             }
-            2 => self.two_fingers(frame, &mut out),
+            2 => {
+                // The finger put back on a paused scroll lands anywhere: go on from here.
+                if let TwoFinger::Scrolling { axis, .. } = self.two_finger
+                    && previous.iter().flatten().count() < 2
+                    && let Some(now) = frame.first::<2>()
+                {
+                    self.two_finger = TwoFinger::Scrolling { last: now, axis };
+                    return out;
+                }
+                self.two_fingers(frame, &mut out);
+            }
             _ => {}
         }
         out
@@ -583,10 +646,16 @@ impl Recognizer {
         let next = match self.two_finger {
             TwoFinger::Idle => TwoFinger::Deciding {
                 start: now,
+                started_ms: frame.at_ms,
                 last: now,
                 sent: [(0, 0); 2],
             },
-            TwoFinger::Deciding { start, last, mut sent } => match classify(start, now, &self.px) {
+            TwoFinger::Deciding {
+                start,
+                started_ms,
+                last,
+                mut sent,
+            } => match classify(start, now, &self.px) {
                 // Moving together: a scroll.
                 Some(TwoFingerKind::Scroll) => TwoFinger::Scrolling {
                     last: now,
@@ -598,7 +667,12 @@ impl Recognizer {
                     if len(sub(now[1 - finger], start[1 - finger])) < self.px.decide / 4 {
                         out.cursor(sub(sub(now[finger], start[finger]), sent[finger]));
                     }
-                    TwoFinger::Pointing { finger, last: now }
+                    TwoFinger::Pointing {
+                        finger,
+                        last: now,
+                        started_ms,
+                        from: start,
+                    }
                 }
                 None => {
                     // One finger resting while the other moves is most likely a cursor
@@ -613,16 +687,45 @@ impl Recognizer {
                         out.cursor(step);
                         sent[mover] = (sent[mover].0 + step.0, sent[mover].1 + step.1);
                     }
-                    TwoFinger::Deciding { start, last: now, sent }
+                    TwoFinger::Deciding {
+                        start,
+                        started_ms,
+                        last: now,
+                        sent,
+                    }
                 }
             },
             TwoFinger::Scrolling { last, axis } => {
                 scroll(common(last, now), axis, out);
                 TwoFinger::Scrolling { last: now, axis }
             }
-            TwoFinger::Pointing { finger, last } => {
-                out.cursor(sub(now[finger], last[finger]));
-                TwoFinger::Pointing { finger, last: now }
+            TwoFinger::Pointing {
+                finger,
+                last,
+                started_ms,
+                from,
+            } => {
+                let other = 1 - finger;
+                let (moved, joined) = (sub(now[finger], from[finger]), sub(now[other], from[other]));
+                // The other finger set off the same way soon after landing: a scroll that
+                // started with one finger.
+                if frame.at_ms.saturating_sub(started_ms) <= JOIN_MS
+                    && len(joined) >= self.px.decide
+                    && within_angle(moved, joined, 707, false)
+                {
+                    TwoFinger::Scrolling {
+                        last: now,
+                        axis: scroll_axis(joined),
+                    }
+                } else {
+                    out.cursor(sub(now[finger], last[finger]));
+                    TwoFinger::Pointing {
+                        finger,
+                        last: now,
+                        started_ms,
+                        from,
+                    }
+                }
             }
         };
         self.two_finger = next;
@@ -1258,7 +1361,7 @@ mod tests {
 
     #[test]
     fn once_scrolling_one_finger_moving_alone_does_nothing() {
-        let (outs, _) = run(&[
+        let (outs, recognizer) = run(&[
             two(0, (400, 500), (600, 500)),
             two(10, (400, 530), (600, 530)), // decided: a scroll
             two(20, (400, 540), (600, 540)), // scrolls 10
@@ -1268,6 +1371,60 @@ mod tests {
             one(60, (480, 680)),
         ]);
         assert_eq!(axes(&outs), vec![[(Axis::H, 0), (Axis::V, 10)]]);
+        // Paused until a finger is back or both lift.
+        assert!(matches!(recognizer.two_finger, TwoFinger::Scrolling { .. }));
+    }
+
+    #[test]
+    fn a_scroll_pauses_while_a_finger_is_lifted_and_goes_on_when_it_is_back() {
+        let (outs, recognizer) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(10, (400, 530), (600, 530)), // decided: a scroll
+            two(20, (400, 540), (600, 540)), // scrolls 10
+            one(30, (400, 550)),             // one lifts: paused, no cursor
+            one(40, (400, 560)),
+            two(200, (400, 560), (700, 400)), // back, elsewhere: no jump
+            two(210, (400, 570), (700, 410)), // scrolls on at once
+        ]);
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::H, 0), (Axis::V, 10)], [(Axis::H, 0), (Axis::V, 10)]]
+        );
+        assert!(matches!(recognizer.two_finger, TwoFinger::Scrolling { .. }));
+    }
+
+    #[test]
+    fn a_scroll_can_start_with_one_finger_and_the_second_joining() {
+        let (outs, recognizer) = run(&[
+            one(0, (300, 600)),
+            one(10, (300, 580)),             // moving up alone: the cursor
+            two(20, (300, 560), (500, 600)), // a second finger lands, still at first
+            two(30, (300, 540), (500, 600)),
+            two(40, (300, 520), (500, 600)), // only the first has moved: the cursor
+            two(60, (300, 500), (500, 570)),
+            two(80, (300, 480), (500, 540)), // the second follows: a vertical scroll
+            two(90, (300, 470), (500, 530)),
+        ]);
+        assert!(matches!(
+            recognizer.two_finger,
+            TwoFinger::Scrolling {
+                axis: ScrollAxis::Vertical,
+                ..
+            }
+        ));
+        assert_eq!(axes(&outs).last(), Some(&[(Axis::H, 0), (Axis::V, -10)]));
+    }
+
+    #[test]
+    fn a_resting_finger_moving_late_doesnt_turn_a_cursor_move_into_a_scroll() {
+        let (_, recognizer) = run(&[
+            two(0, (300, 600), (500, 600)),
+            two(10, (300, 570), (500, 600)),
+            two(20, (300, 540), (500, 600)),  // the first moves the cursor
+            two(400, (300, 500), (500, 560)), // the second moves too, but much later
+            two(410, (300, 490), (500, 550)),
+        ]);
+        assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { .. }));
     }
 
     #[test]
@@ -1314,6 +1471,67 @@ mod tests {
         // All of the second finger's motion still reaches the cursor.
         assert_eq!(total, (-11, -162));
         assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { finger: 1, .. }));
+    }
+
+    /// Runs frames of up to two fingers from a recording on a TPS43 (1792 by 2048).
+    fn replay(frames: &[(u64, Option<Point>, Option<Point>)]) -> Vec<Output> {
+        let mut recognizer = Recognizer::new(TouchGestureConfig::default());
+        frames
+            .iter()
+            .map(|&(at_ms, a, b)| {
+                let frame = Frame {
+                    count: [a, b].iter().flatten().count() as u8,
+                    slots: [a, b, None, None, None],
+                    at_ms,
+                };
+                recognizer.frame(&frame, (1792, 2048), &bound)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_point_gliding_between_two_fingers_as_one_lands_or_lifts_is_no_cursor_motion() {
+        // From a recording on a TPS43 (2048 tall): one finger rests, a second one
+        // lifts, lands again and lifts. Each time the touchpad's one point glided
+        // about 150 a frame toward the other finger and back, and the cursor with it;
+        // the last time without the finger count changing on the way back.
+        let frames = [
+            (289791, Some((1155, 694)), None),
+            (289828, Some((1155, 695)), None),
+            (289851, Some((1155, 695)), Some((530, 1167))),
+            (289858, Some((1018, 800)), None),
+            (289873, Some((880, 905)), None),
+            (289881, Some((879, 905)), None),
+            (289896, Some((877, 906)), None),
+            (289911, Some((1006, 813)), Some((529, 1170))),
+            (289926, Some((1136, 720)), Some((529, 1170))),
+            (289934, Some((1136, 720)), Some((528, 1172))),
+            (289956, Some((1137, 720)), Some((527, 1174))),
+            (289994, Some((1138, 719)), Some((524, 1179))),
+            (291899, Some((1164, 689)), Some((563, 1265))),
+            (291913, Some((1040, 776)), None),
+            (291928, Some((922, 859)), None),
+            (291936, Some((1036, 763)), None),
+            (291943, Some((1144, 672)), None),
+            (291958, Some((1144, 671)), None),
+        ];
+        let steps: Vec<_> = replay(&frames)
+            .iter()
+            .filter_map(|out| match out.axes {
+                Some([(Axis::X, x), (Axis::Y, y)]) => Some((x, y)),
+                _ => None,
+            })
+            .collect();
+        assert!(steps.iter().all(|&(x, y)| x.abs() + y.abs() < 40), "{steps:?}");
+    }
+
+    #[test]
+    fn a_fast_move_long_after_fingers_change_is_cursor_motion() {
+        let (outs, _) = run(&[one(0, (100, 100)), one(100, (200, 100)), one(110, (300, 100))]);
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::X, 100), (Axis::Y, 0)], [(Axis::X, 100), (Axis::Y, 0)]]
+        );
     }
 
     #[test]
