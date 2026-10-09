@@ -615,6 +615,11 @@ impl<'a> PointingProcessor<'a> {
 
     /// Set the pointing mode
     pub fn set_pointing_mode(&mut self, mode: PointingMode) -> &mut Self {
+        if self.current_mode != mode {
+            self.accumulator.reset();
+            self.acceleration_rest = (0, 0);
+            self.scroll_acceleration_rest = (0, 0);
+        }
         self.current_mode = mode;
         self
     }
