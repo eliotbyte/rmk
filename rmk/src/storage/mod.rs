@@ -482,9 +482,9 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
     /// Overwrite every item the layout owns with the compiled-in defaults, so a value a host
     /// wrote earlier stops shadowing what was flashed. Only `clear_layout` reaches here.
     #[cfg(feature = "host")]
-    pub(crate) async fn write_layout(
+    pub(crate) async fn write_layout<const NUM_TOUCHPAD: usize>(
         &mut self,
-        data: &mut crate::keymap::KeymapData<ROW, COL, NUM_LAYER, NUM_ENCODER>,
+        data: &mut crate::keymap::KeymapData<ROW, COL, NUM_LAYER, NUM_ENCODER, NUM_TOUCHPAD>,
         behavior: &config::BehaviorConfig,
     ) {
         let mut put = async |item| {
