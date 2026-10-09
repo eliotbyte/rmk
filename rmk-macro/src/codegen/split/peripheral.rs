@@ -20,10 +20,13 @@ use crate::codegen::import::expand_custom_imports;
 use crate::codegen::input_device::adc::expand_adc_device;
 use crate::codegen::input_device::battery::expand_battery_devices;
 use crate::codegen::input_device::encoder::expand_encoder_device;
-use crate::codegen::input_device::iqs5xx::{expand_iqs5xx_device, expand_iqs5xx_interrupts};
+use crate::codegen::input_device::iqs5xx::{
+    count_touchpads, expand_iqs5xx_device, expand_iqs5xx_interrupts,
+};
 use crate::codegen::input_device::pmw33xx::expand_pmw33xx_device;
 use crate::codegen::input_device::pmw3610::expand_pmw3610_device;
 use crate::codegen::keyboard_config::read_keyboard_toml_config;
+use crate::codegen::keymap::expand_touchpad_layers;
 use crate::codegen::matrix::{
     expand_bootmagic_check, expand_matrix_direct_pins, expand_matrix_input_output_pins,
 };
@@ -85,6 +88,14 @@ pub(crate) fn parse_split_peripheral_mod(
         quote! {}
     };
 
+    let keymap = toml_config
+        .keymap()
+        .expect("failed to resolve keymap config");
+    let behavior = toml_config
+        .behavior()
+        .expect("failed to resolve behavior config");
+    let touch_layers = expand_touchpad_layers(&keymap, &behavior);
+
     let main_function = expand_split_peripheral(
         id,
         &identity,
@@ -92,6 +103,7 @@ pub(crate) fn parse_split_peripheral_mod(
         item_mod,
         &rmk_features,
         hardware.dfu.as_ref(),
+        &touch_layers,
     );
 
     let bind_interrupts = expand_bind_interrupt_for_split_peripheral(
@@ -371,6 +383,7 @@ fn expand_split_peripheral(
     item_mod: ItemMod,
     rmk_features: &Option<Vec<String>>,
     dfu: Option<&DfuConfig>,
+    touch_layers: &[TokenStream2],
 ) -> TokenStream2 {
     // Check whether keyboard.toml contains split section
     let split_config = match &hardware.board {
@@ -496,7 +509,7 @@ fn expand_split_peripheral(
 
     // Get peripheral device and processor configuration
     let (device_initialization, devices, processors) =
-        expand_peripheral_input_device_config(id, hardware);
+        expand_peripheral_input_device_config(id, hardware, touch_layers);
 
     let needs_keymap = peripheral_config
         .input_device
@@ -691,10 +704,12 @@ fn expand_split_peripheral_entry(
     }
 }
 
+/// `touch_layers` holds each touchpad's gesture actions per layer, in touch map order.
 /// Returns (device initializations, device_names, processor_names)
 pub(crate) fn expand_peripheral_input_device_config(
     id: usize,
     hardware: &Hardware,
+    touch_layers: &[TokenStream2],
 ) -> (TokenStream2, Vec<TokenStream2>, Vec<TokenStream2>) {
     let mut initializations = TokenStream2::new();
     let mut devices = Vec::new();
@@ -792,24 +807,43 @@ pub(crate) fn expand_peripheral_input_device_config(
         devices.push(quote! { #device_name });
     }
 
-    // generate IQS5xx configuration
-    let (iqs5xx_devices, _iqs5xx_processors) = match board {
-        BoardConfig::Split(split_config) => expand_iqs5xx_device(
-            split_config.peripheral[id]
-                .input_device
-                .clone()
-                .unwrap_or(InputDeviceConfig::default())
-                .iqs5xx
-                .unwrap_or(Vec::new()),
-            chip,
-        ),
-        _ => (vec![], vec![]),
+    // generate IQS5xx configuration: the devices, and their touch processors, which
+    // run here. Pointing processors run on the central. Touch map indices go to the
+    // central's trackpads with gestures first, then each peripheral's.
+    let (iqs5xx_devices, _iqs5xx_processors, iqs5xx_touch_processors) = match board {
+        BoardConfig::Split(split_config) => {
+            let iqs5xx = |input_device: &Option<InputDeviceConfig>| {
+                input_device
+                    .clone()
+                    .unwrap_or_default()
+                    .iqs5xx
+                    .unwrap_or_default()
+            };
+            let first_touchpad_id = count_touchpads(&iqs5xx(&split_config.central.input_device))
+                + split_config.peripheral[..id]
+                    .iter()
+                    .map(|p| count_touchpads(&iqs5xx(&p.input_device)))
+                    .sum::<usize>();
+            expand_iqs5xx_device(
+                iqs5xx(&split_config.peripheral[id].input_device),
+                chip,
+                first_touchpad_id,
+                touch_layers,
+            )
+        }
+        _ => (vec![], vec![], vec![]),
     };
 
     for initializer in iqs5xx_devices {
         initializations.extend(initializer.initializer);
         let device_name = initializer.var_name;
         devices.push(quote! { #device_name });
+    }
+
+    for initializer in iqs5xx_touch_processors {
+        initializations.extend(initializer.initializer);
+        let processor_name = initializer.var_name;
+        processors.push(quote! { #processor_name });
     }
 
     (initializations, devices, processors)

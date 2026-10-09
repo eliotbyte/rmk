@@ -71,6 +71,24 @@ impl BoardConfig {
 }
 
 impl KeyboardTomlConfig {
+    /// Board-wide count of touchpads with gestures, in `[[keymap.layer]].touch` order:
+    /// the central's or unibody's first, then each peripheral's.
+    pub(crate) fn total_touchpads(&self) -> usize {
+        let count = |device: &Option<InputDeviceConfig>| {
+            device
+                .as_ref()
+                .and_then(|d| d.iqs5xx.as_ref())
+                .map_or(0, |v| v.iter().filter(|t| t.gestures.is_some()).count())
+        };
+        match &self.split {
+            Some(split) => {
+                count(&split.central.input_device)
+                    + split.peripheral.iter().map(|p| count(&p.input_device)).sum::<usize>()
+            }
+            None => count(&self.input_device),
+        }
+    }
+
     /// Board-wide encoder count, without resolving the board.
     ///
     /// Split halves declare their own encoders; every other shape — unibody, or a

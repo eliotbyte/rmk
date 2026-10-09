@@ -631,6 +631,8 @@ pub(crate) struct LayerTomlConfig {
     pub name: Option<String>,
     pub keys: String,
     pub encoders: Option<Vec<[String; 2]>>,
+    /// Gesture actions, one entry per touchpad with gestures.
+    pub touch: Option<Vec<TouchActionsConfig>>,
 }
 
 /// Configurations for keyboard info
@@ -841,6 +843,7 @@ pub(crate) struct KeymapConfig {
     pub layers: u8,
     pub keymap: Vec<Vec<Vec<String>>>,
     pub encoder_map: Vec<Vec<[String; 2]>>, // Empty if there are no encoders or not configured
+    pub touch_map: Vec<Vec<TouchActionsConfig>>, // Empty if there are no touchpads or not configured
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1400,8 +1403,66 @@ pub struct Iqs5xxConfig {
     pub proc_swap_xy: bool,
     /// Cursor acceleration in the PointingProcessor. Off unless configured.
     pub acceleration: Option<PointingAccelerationConfig>,
-    /// Scroll-mode acceleration in the PointingProcessor. Off unless configured.
+    /// Acceleration of scroll mode and two-finger scrolling in the PointingProcessor.
+    /// Off unless configured.
     pub scroll_acceleration: Option<PointingAccelerationConfig>,
+    /// Gestures. Off unless configured.
+    pub gestures: Option<TouchGesturesConfig>,
+}
+
+/// One touchpad's gesture actions on a layer: an entry of `[[keymap.layer]].touch`.
+/// A gesture left out is transparent, taking its action from the layer below.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TouchActionsConfig {
+    /// One finger touching and lifting without moving, e.g. `"MouseBtn1"`.
+    pub tap: Option<String>,
+    /// e.g. `"MouseBtn2"`.
+    pub two_finger_tap: Option<String>,
+    /// e.g. `"MouseBtn3"`.
+    pub three_finger_tap: Option<String>,
+}
+
+impl TouchActionsConfig {
+    /// Each gesture's action by its `rmk_types::action::TouchGesture` variant name.
+    pub fn actions(&self) -> [(&'static str, &Option<String>); 3] {
+        [
+            ("Tap", &self.tap),
+            ("TwoFingerTap", &self.two_finger_tap),
+            ("ThreeFingerTap", &self.three_finger_tap),
+        ]
+    }
+
+    /// The same with every action changed by `f`.
+    pub(crate) fn try_map(&self, mut f: impl FnMut(&str) -> Result<String, String>) -> Result<Self, String> {
+        let mut map = |action: &Option<String>| action.as_deref().map(&mut f).transpose();
+        Ok(Self {
+            tap: map(&self.tap)?,
+            two_finger_tap: map(&self.two_finger_tap)?,
+            three_finger_tap: map(&self.three_finger_tap)?,
+        })
+    }
+}
+
+/// Touchpad gesture recognition (`[input_device.<touchpad>.gestures]`). Its presence
+/// turns gestures on for that touchpad: it then reports finger positions, and the
+/// central recognizes gestures from them. What each gesture does is set per layer in
+/// `[[keymap.layer]].touch`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TouchGesturesConfig {
+    /// Touchpad movement per scroll step; larger scrolls slower. Defaults to 8.
+    pub scroll_divisor: Option<u8>,
+    /// Content follows the fingers, as on a phone.
+    #[serde(default)]
+    pub natural_scroll: bool,
+    /// A one-finger tap moves at most this far, in percent of the touchpad's longer
+    /// side; more is a cursor move, or a drag on the touch after a tap. Defaults to 3,
+    /// about libinput's 1.3 mm on a 43 mm trackpad.
+    pub tap_move_percent: Option<u8>,
+    /// A tap lasts at least this many milliseconds; a shorter touch is a graze. Off
+    /// (0) by default.
+    pub tap_min_ms: Option<u16>,
 }
 
 /// I²C bus configuration for the IQS5xx. Distinct from the generic `I2cConfig`

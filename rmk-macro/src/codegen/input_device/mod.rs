@@ -38,10 +38,12 @@ pub(crate) fn expand_pointing_acceleration(
     }
 }
 
-/// Expands the input device configuration.
+/// Expands the input device configuration. `touch_layers` holds each touchpad's
+/// gesture actions per layer, in touch map order.
 /// Returns a tuple containing: (device_and_processors_initialization, devices, processors)
 pub(crate) fn expand_input_device_config(
     hardware: &Hardware,
+    touch_layers: &[TokenStream],
 ) -> (TokenStream, Vec<TokenStream>, Vec<TokenStream>) {
     let mut initialization = TokenStream::new();
     let mut devices = Vec::new();
@@ -206,22 +208,23 @@ pub(crate) fn expand_input_device_config(
         }
     }
 
-    // generate IQS5xx configuration
-    let (iqs5xx_device_initializers, iqs5xx_processor_initializers) = match board {
+    // generate IQS5xx configuration. Touch map indices go to the central's (or
+    // unibody's) trackpads with gestures first, then each peripheral's; their touch
+    // processors run on the peripherals.
+    let central_iqs5xx = match board {
         BoardConfig::UniBody(UniBodyConfig { input_device, .. }) => {
-            expand_iqs5xx_device(input_device.clone().iqs5xx.unwrap_or(Vec::new()), chip)
+            input_device.clone().iqs5xx.unwrap_or(Vec::new())
         }
-        BoardConfig::Split(split_config) => expand_iqs5xx_device(
-            split_config
-                .central
-                .input_device
-                .clone()
-                .unwrap_or(InputDeviceConfig::default())
-                .iqs5xx
-                .unwrap_or(Vec::new()),
-            chip,
-        ),
+        BoardConfig::Split(split_config) => split_config
+            .central
+            .input_device
+            .clone()
+            .unwrap_or(InputDeviceConfig::default())
+            .iqs5xx
+            .unwrap_or(Vec::new()),
     };
+    let (iqs5xx_device_initializers, iqs5xx_processor_initializers, iqs5xx_touch_initializers) =
+        expand_iqs5xx_device(central_iqs5xx, chip, 0, touch_layers);
 
     for initializer in iqs5xx_device_initializers {
         initialization.extend(initializer.initializer);
@@ -229,14 +232,18 @@ pub(crate) fn expand_input_device_config(
         devices.push(quote! { #device_name });
     }
 
-    for initializer in iqs5xx_processor_initializers {
+    for initializer in iqs5xx_processor_initializers
+        .into_iter()
+        .chain(iqs5xx_touch_initializers)
+    {
         initialization.extend(initializer.initializer);
         let processor_name = initializer.var_name;
         processors.push(quote! { #processor_name });
     }
 
-    // For split keyboards, also generate processors for IQS5xx devices on peripherals
-    // The devices run on peripherals, but processors need to run on central to handle the events
+    // For split keyboards, also generate pointing processors for IQS5xx devices on
+    // peripherals. The devices and their touch processors run on the peripherals,
+    // but pointing processors need to run on central to handle the events
     if let BoardConfig::Split(split_config) = board {
         for peripheral in &split_config.peripheral {
             let peripheral_iqs5xx_config = peripheral
@@ -246,9 +253,9 @@ pub(crate) fn expand_input_device_config(
                 .iqs5xx
                 .unwrap_or(Vec::new());
 
-            // Only generate processors (not devices) for peripheral IQS5xx
-            let (_, peripheral_iqs5xx_processors) =
-                expand_iqs5xx_device(peripheral_iqs5xx_config, chip);
+            // Only generate pointing processors for peripheral IQS5xx
+            let (_, peripheral_iqs5xx_processors, _) =
+                expand_iqs5xx_device(peripheral_iqs5xx_config, chip, 0, &[]);
 
             for initializer in peripheral_iqs5xx_processors {
                 initialization.extend(initializer.initializer);

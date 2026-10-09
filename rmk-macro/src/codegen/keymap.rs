@@ -2,20 +2,17 @@
 use std::collections::HashMap;
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
+use rmk_config::TouchActionsConfig;
 use rmk_config::resolved::behavior::MorseProfile;
 use rmk_config::resolved::{Behavior, Keymap};
 
 use super::action_parser::parse_key;
 
 /// Read the default keymap setting in `keyboard.toml` and add as a `get_default_keymap` function
-/// Also add `get_default_encoder_map`
+/// Also add `get_default_encoder_map`, and `get_default_touch_map` for a board with touchpads
 pub(crate) fn expand_default_keymap(keymap: &Keymap, behavior: &Behavior) -> TokenStream2 {
-    let profiles: Option<HashMap<String, MorseProfile>> = behavior
-        .morse
-        .as_ref()
-        .map(|m| m.profiles.clone())
-        .filter(|p| !p.is_empty());
+    let profiles = morse_profiles(behavior);
 
     let num_encoder = keymap.num_encoder;
 
@@ -38,6 +35,23 @@ pub(crate) fn expand_default_keymap(keymap: &Keymap, behavior: &Behavior) -> Tok
         quote! { [::rmk::encoder!(::rmk::k!(No), ::rmk::k!(No)); NUM_ENCODER] },
     );
 
+    let touch_map = (keymap.num_touchpad > 0).then(|| {
+        let mut touch_map = keymap.touch_map.clone();
+        touch_map.resize(keymap.keymap.len(), Vec::new());
+        let touch_layers = touch_map
+            .iter()
+            .map(|layer| {
+                let touchpads =
+                    (0..keymap.num_touchpad).map(|i| expand_touch_actions(layer.get(i), &profiles));
+                quote! { [#(#touchpads), *] }
+            });
+        quote! {
+            pub const fn get_default_touch_map() -> [[::rmk::types::action::TouchAction; NUM_TOUCHPAD]; NUM_LAYER] {
+                [#(#touch_layers), *]
+            }
+        }
+    });
+
     quote! {
         pub const fn get_default_keymap() -> [[[::rmk::types::action::KeyAction; COL]; ROW]; NUM_LAYER] {
             [#(#layers), *]
@@ -46,7 +60,54 @@ pub(crate) fn expand_default_keymap(keymap: &Keymap, behavior: &Behavior) -> Tok
         pub const fn get_default_encoder_map() -> [[::rmk::types::action::EncoderAction; NUM_ENCODER]; NUM_LAYER] {
             [#(#encoder_map), *]
         }
+
+        #touch_map
     }
+}
+
+fn morse_profiles(behavior: &Behavior) -> Option<HashMap<String, MorseProfile>> {
+    behavior
+        .morse
+        .as_ref()
+        .map(|m| m.profiles.clone())
+        .filter(|p| !p.is_empty())
+}
+
+/// Each touchpad's gesture actions per layer, as a `[TouchAction; layers]`, in touch
+/// map order: for its touch processor, which runs on the board the touchpad is on,
+/// to tell which gestures a layer binds.
+pub(crate) fn expand_touchpad_layers(keymap: &Keymap, behavior: &Behavior) -> Vec<TokenStream2> {
+    let profiles = morse_profiles(behavior);
+    (0..keymap.num_touchpad)
+        .map(|id| {
+            let layers = (0..keymap.keymap.len()).map(|layer| {
+                expand_touch_actions(
+                    keymap.touch_map.get(layer).and_then(|l| l.get(id)),
+                    &profiles,
+                )
+            });
+            quote! { [#(#layers), *] }
+        })
+        .collect()
+}
+
+/// One touchpad's gesture actions on one layer. A gesture the layer leaves out is
+/// transparent, so layers only list what they change.
+fn expand_touch_actions(
+    actions: Option<&TouchActionsConfig>,
+    profiles: &Option<HashMap<String, MorseProfile>>,
+) -> TokenStream2 {
+    let none = TouchActionsConfig::default();
+    let with = actions
+        .unwrap_or(&none)
+        .actions()
+        .into_iter()
+        .filter_map(|(gesture, action)| {
+            let gesture = format_ident!("{}", gesture);
+            let action = parse_key(action.clone()?, profiles);
+            Some(quote! { .with(::rmk::types::action::TouchGesture::#gesture, #action) })
+        });
+    quote! { ::rmk::types::action::TouchAction::transparent() #(#with)* }
 }
 
 /// Expand a layer for keymap

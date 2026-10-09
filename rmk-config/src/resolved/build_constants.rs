@@ -179,6 +179,15 @@ impl crate::KeyboardTomlConfig {
             event.subs += pointing_devices;
         }
 
+        // Each touchpad with gestures has a touch processor on its board, subscribing
+        // to its touch frames and to layer changes.
+        let touchpads = self.total_touchpads();
+        for name in ["touch", "layer_change"] {
+            if let Some(event) = events.iter_mut().find(|event| event.name == name) {
+                event.subs += touchpads;
+            }
+        }
+
         // Every link subscribes to the outgoing queue, so a central needs one
         // slot per split peripheral on top of its link toward the dongle.
         if active_features.contains(&"custom_message")
@@ -390,6 +399,33 @@ mod tests {
         // Nobody listens on a screenless dongle, so publishing there is a no-op.
         assert_eq!(subs(&["dongle", "_ble", "storage"]), 0);
         assert_eq!(subs(&["dongle", "display", "_ble", "storage"]), 1);
+    }
+
+    #[test]
+    fn touchpads_with_gestures_reserve_touch_and_layer_change_subscribers() {
+        let subs_of = |name: &str, toml: &str| {
+            parse(toml)
+                .build_constants(&[])
+                .unwrap()
+                .events
+                .into_iter()
+                .find(|event| event.name == name)
+                .unwrap()
+                .subs
+        };
+        let pad = |gestures: &str| {
+            format!(
+                "[[input_device.iqs5xx]]\nname = \"pad\"\n\
+                 i2c = {{ instance = \"TWISPI0\", sda = \"P0_17\", scl = \"P0_20\" }}\n{gestures}"
+            )
+        };
+        // Nothing by default, so boards without a touchpad pay nothing.
+        assert_eq!(subs_of("touch", ""), 0);
+        assert_eq!(subs_of("touch", &pad("")), 0);
+        // One touch processor.
+        let with_gestures = pad("[input_device.iqs5xx.gestures]\n");
+        assert_eq!(subs_of("touch", &with_gestures), 1);
+        assert_eq!(subs_of("layer_change", &with_gestures), subs_of("layer_change", "") + 1);
     }
 
     #[test]

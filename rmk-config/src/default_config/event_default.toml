@@ -75,7 +75,7 @@ pubs = 4
 subs = 2
 
 # Raw multi-touch scans from touchpads, which stay on their board. No subscribers
-# by default; a touch processor would subscribe.
+# unless a touchpad with gestures is configured in keyboard.toml (build_constants.rs).
 [event.touch]
 channel_size = 4
 pubs = 2

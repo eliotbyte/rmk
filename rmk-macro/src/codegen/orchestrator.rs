@@ -21,7 +21,7 @@ use super::input_device::expand_input_device_config;
 use super::keyboard_config::{
     expand_keyboard_info, expand_lock_config, expand_vial_config, read_keyboard_toml_config,
 };
-use super::keymap::expand_default_keymap;
+use super::keymap::{expand_default_keymap, expand_touchpad_layers};
 use super::matrix::{expand_bootmagic_check, expand_matrix_config};
 use super::registered_processor::expand_registered_processor_init;
 use super::split::central::expand_split_central_config;
@@ -231,7 +231,9 @@ fn expand_main(
     let output_config = expand_output_config(hardware);
     let keymap_and_storage = expand_keymap_and_storage(hardware, keymap);
     let split_central_config = expand_split_central_config(hardware);
-    let (input_device_config, devices, processors) = expand_input_device_config(hardware);
+    let touch_layers = expand_touchpad_layers(keymap, behavior);
+    let (input_device_config, devices, processors) =
+        expand_input_device_config(hardware, &touch_layers);
     let matrix_and_keyboard = expand_matrix_and_keyboard_init(hardware);
     let (registered_processor_initializers, mut registered_processors) =
         expand_registered_processor_init(hardware, &item_mod);
@@ -484,7 +486,15 @@ pub(crate) fn expand_keymap_and_storage(hardware: &Hardware, keymap: &Keymap) ->
 
     let total_num_encoders = keymap.num_encoder;
 
-    let keymap_data_init = if total_num_encoders == 0 {
+    let keymap_data_init = if keymap.num_touchpad > 0 {
+        quote! {
+            let mut keymap_data = ::rmk::KeymapData::new_with_touch(
+                get_default_keymap(),
+                get_default_encoder_map(),
+                get_default_touch_map(),
+            );
+        }
+    } else if total_num_encoders == 0 {
         quote! {
             let mut keymap_data = ::rmk::KeymapData::new(get_default_keymap());
         }

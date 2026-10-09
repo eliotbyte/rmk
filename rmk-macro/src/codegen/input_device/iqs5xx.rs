@@ -1,17 +1,25 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use rmk_config::TouchGesturesConfig;
 use rmk_config::resolved::hardware::{ChipModel, ChipSeries, Iqs5xxConfig};
 
 use super::{Initializer, expand_pointing_acceleration};
 
-/// Expand IQS5xx device configuration.
-/// Returns (device initializers, processor initializers).
+/// Expand IQS5xx device configuration. `first_touchpad_id` is the touch map index of
+/// the first of these trackpads with gestures; the others with gestures follow.
+/// `touch_layers` holds each touchpad's gesture actions per layer, by that index;
+/// without them, no touch processors are built.
+/// Returns (device initializers, pointing processor initializers, touch processor
+/// initializers). The touch processors run beside the devices, on the same board;
+/// the pointing processors run on the central.
 pub(crate) fn expand_iqs5xx_device(
     iqs5xx_config: Vec<Iqs5xxConfig>,
     chip: &ChipModel,
-) -> (Vec<Initializer>, Vec<Initializer>) {
+    first_touchpad_id: usize,
+    touch_layers: &[TokenStream],
+) -> (Vec<Initializer>, Vec<Initializer>, Vec<Initializer>) {
     if iqs5xx_config.is_empty() {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     }
 
     match chip.series {
@@ -23,6 +31,8 @@ pub(crate) fn expand_iqs5xx_device(
 
     let mut device_initializers = vec![];
     let mut processor_initializers = vec![];
+    let mut touch_initializers = vec![];
+    let mut touchpad_id = first_touchpad_id;
 
     for (idx, sensor) in iqs5xx_config.iter().enumerate() {
         let sensor_id = sensor.id.unwrap_or(0);
@@ -49,6 +59,12 @@ pub(crate) fn expand_iqs5xx_device(
         let proc_swap_xy = sensor.proc_swap_xy;
         let acceleration = expand_pointing_acceleration(&sensor.acceleration);
         let scroll_acceleration = expand_pointing_acceleration(&sensor.scroll_acceleration);
+
+        let with_mode = sensor
+            .gestures
+            .as_ref()
+            .map(|_| quote! { .with_mode(::rmk::input_device::iqs5xx::Iqs5xxMode::RawTouch) });
+        let device_scroll = expand_device_scroll(sensor.gestures.as_ref());
 
         let rdy_init = match (&sensor.rdy, &chip.series) {
             (Some(rdy_pin), ChipSeries::Nrf52) => {
@@ -95,7 +111,7 @@ pub(crate) fn expand_iqs5xx_device(
                     #sensor_id,
                     #i2c_ident,
                     #rdy_ident,
-                );
+                )#with_mode;
             },
             ChipSeries::Rp2040 => quote! {
                 #rdy_init
@@ -110,7 +126,7 @@ pub(crate) fn expand_iqs5xx_device(
                     #sensor_id,
                     #i2c_ident,
                     #rdy_ident,
-                );
+                )#with_mode;
             },
             _ => unreachable!(),
         };
@@ -128,7 +144,7 @@ pub(crate) fn expand_iqs5xx_device(
                 swap_xy: #proc_swap_xy,
                 acceleration: #acceleration,
                 scroll_acceleration: #scroll_acceleration,
-                device_scroll: ::rmk::input_device::pointing::ScrollConfig::default(),
+                device_scroll: #device_scroll,
             };
             let mut #processor_ident = ::rmk::input_device::pointing::PointingProcessor::new(
                 &keymap,
@@ -140,9 +156,73 @@ pub(crate) fn expand_iqs5xx_device(
             initializer: processor_init,
             var_name: processor_ident,
         });
+
+        if let Some(gestures) = &sensor.gestures
+            && let Some(layers) = touch_layers.get(touchpad_id)
+        {
+            let touch_ident = format_ident!("{}_touch", sensor_name);
+            let config = expand_touch_gesture_config(gestures, sensor_id, touchpad_id);
+            let layers_ident = format_ident!("{}_TOUCH_LAYERS", sensor_name.to_uppercase());
+            touchpad_id += 1;
+            touch_initializers.push(Initializer {
+                initializer: quote! {
+                    static #layers_ident: &[::rmk::types::action::TouchAction] = &#layers;
+                    let mut #touch_ident = ::rmk::input_device::touch::TouchGestureProcessor::new(#layers_ident, #config);
+                },
+                var_name: touch_ident,
+            });
+        }
     }
 
-    (device_initializers, processor_initializers)
+    (
+        device_initializers,
+        processor_initializers,
+        touch_initializers,
+    )
+}
+
+/// The PointingProcessor's handling of a trackpad's two-finger scrolling.
+fn expand_device_scroll(gestures: Option<&TouchGesturesConfig>) -> TokenStream {
+    let divisor = gestures.and_then(|g| g.scroll_divisor).unwrap_or(8);
+    // Natural scrolling moves the content with the fingers: the wheel turns the other way.
+    let natural = gestures.is_some_and(|g| g.natural_scroll);
+    quote! {
+        ::rmk::input_device::pointing::ScrollConfig {
+            multiplier_x: 1,
+            divisor_x: #divisor,
+            multiplier_y: 1,
+            divisor_y: #divisor,
+            invert_x: #natural,
+            invert_y: #natural,
+        }
+    }
+}
+
+/// A `TouchGestureConfig` from `[input_device.iqs5xx.gestures]`.
+fn expand_touch_gesture_config(
+    gestures: &TouchGesturesConfig,
+    device_id: u8,
+    touchpad_id: usize,
+) -> TokenStream {
+    let touchpad_id = u8::try_from(touchpad_id).expect("at most 256 touchpads");
+    let tap_move_percent = gestures.tap_move_percent.unwrap_or(3);
+    let tap_min_ms = gestures.tap_min_ms.unwrap_or(0);
+    quote! {
+        ::rmk::input_device::touch::TouchGestureConfig {
+            device_id: #device_id,
+            touchpad_id: #touchpad_id,
+            tap_move_percent: #tap_move_percent,
+            tap_min_ms: #tap_min_ms,
+        }
+    }
+}
+
+/// How many of `iqs5xx_config` have gestures, so take touch map indices.
+pub(crate) fn count_touchpads(iqs5xx_config: &[Iqs5xxConfig]) -> usize {
+    iqs5xx_config
+        .iter()
+        .filter(|sensor| sensor.gestures.is_some())
+        .count()
 }
 
 /// Generate `bind_interrupts!` entries for the I²C peripherals used by IQS5xx
