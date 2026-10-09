@@ -10,8 +10,8 @@ trackpad modules.
   need the [Rust API](#rust-configuration).
 - Without [gestures](#gestures), only relative single-finger cursor movement
   is reported. With them, the positions of up to five fingers are, and RMK
-  recognizes taps, drags and two-finger scrolling from them. Raw channel data is
-  not read.
+  recognizes taps, drags, two-finger scrolling and pinch zoom from them. Raw
+  channel data is not read.
 - Use [Sniper mode](./pointing_processor#sniper) to reduce cursor sensitivity.
 - An `RDY` (ready) pin is strongly recommended. Without it, the driver falls
   back to timed polling and may stall the I²C bus through clock-stretching if
@@ -91,14 +91,15 @@ peripheral's. Each action takes the same syntax as a key in `keys`:
 ```toml
 [[keymap.layer]]
 keys = "..."
-touch = [{ tap = "MouseBtn1", two_finger_tap = "MouseBtn2", three_finger_tap = "MouseBtn3" }]
+touch = [{ tap = "MouseBtn1", two_finger_tap = "MouseBtn2", zoom_in = "WM(Equal, LCtrl)", zoom_out = "WM(Minus, LCtrl)" }]
 ```
 
 | Gesture | Recognized when |
 |---|---|
 | `tap`, `two_finger_tap`, `three_finger_tap` | The fingers touch and lift without moving, within 180 ms for one finger and 300 ms for more |
 | `tap`, held | One finger touches within `tap_drag_ms` of a tap lifting, close to it, and moves or rests: the tap becomes a drag, its action pressed until the finger lifts. Tap, then touch and move drags; two quick taps double-click; tap, tap, touch and move double-clicks and drags. A tap waits out `tap_drag_ms` before it clicks. During the drag another finger can take over when the first runs out of room. |
-| `two_finger_tap`, `three_finger_tap`, held | The same with two or three fingers: tap, then touch with as many fingers and move drags with the right or middle button. The drag only moves the cursor, no scrolling, and goes on while any of its fingers touches. |
+| `two_finger_tap`, `three_finger_tap`, held | The same with two or three fingers: tap, then touch with as many fingers and move drags with the right or middle button. The drag only moves the cursor, no scrolling or zoom, and goes on while any of its fingers touches. |
+| `zoom_in`, `zoom_out` | Two fingers move apart / together along the line between them, once per zoom step |
 
 A gesture with no action on the active layer isn't recognized there at all.
 

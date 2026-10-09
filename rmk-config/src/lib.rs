@@ -1421,15 +1421,21 @@ pub struct TouchActionsConfig {
     pub two_finger_tap: Option<String>,
     /// e.g. `"MouseBtn3"`.
     pub three_finger_tap: Option<String>,
+    /// Two fingers moving apart, once per zoom step, e.g. `"WM(Equal, LCtrl)"`.
+    pub zoom_in: Option<String>,
+    /// Two fingers moving together, once per zoom step.
+    pub zoom_out: Option<String>,
 }
 
 impl TouchActionsConfig {
     /// Each gesture's action by its `rmk_types::action::TouchGesture` variant name.
-    pub fn actions(&self) -> [(&'static str, &Option<String>); 3] {
+    pub fn actions(&self) -> [(&'static str, &Option<String>); 5] {
         [
             ("Tap", &self.tap),
             ("TwoFingerTap", &self.two_finger_tap),
             ("ThreeFingerTap", &self.three_finger_tap),
+            ("ZoomIn", &self.zoom_in),
+            ("ZoomOut", &self.zoom_out),
         ]
     }
 
@@ -1440,6 +1446,8 @@ impl TouchActionsConfig {
             tap: map(&self.tap)?,
             two_finger_tap: map(&self.two_finger_tap)?,
             three_finger_tap: map(&self.three_finger_tap)?,
+            zoom_in: map(&self.zoom_in)?,
+            zoom_out: map(&self.zoom_out)?,
         })
     }
 }

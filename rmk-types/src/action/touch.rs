@@ -17,14 +17,24 @@ pub enum TouchGesture {
     Tap,
     TwoFingerTap,
     ThreeFingerTap,
+    /// Two fingers moving apart, once per zoom step.
+    ZoomIn,
+    /// Two fingers moving together, once per zoom step.
+    ZoomOut,
 }
 
 impl TouchGesture {
     /// How many gestures there are.
-    pub const COUNT: usize = 3;
+    pub const COUNT: usize = 5;
 
     /// Every gesture, in the order of [`TouchAction::actions`].
-    pub const ALL: [Self; Self::COUNT] = [Self::Tap, Self::TwoFingerTap, Self::ThreeFingerTap];
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Tap,
+        Self::TwoFingerTap,
+        Self::ThreeFingerTap,
+        Self::ZoomIn,
+        Self::ZoomOut,
+    ];
 }
 
 /// The actions of a touchpad's gestures, stored in the touch map.
@@ -80,6 +90,6 @@ mod tests {
         for (i, gesture) in TouchGesture::ALL.iter().enumerate() {
             assert_eq!(*gesture as usize, i);
         }
-        assert_eq!(TouchGesture::ThreeFingerTap as usize + 1, TouchGesture::COUNT);
+        assert_eq!(TouchGesture::ZoomOut as usize + 1, TouchGesture::COUNT);
     }
 }

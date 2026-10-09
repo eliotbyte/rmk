@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Touchpad drag lock: with `drag_lock_ms`, a drag outlives its fingers lifting for that long, so they can be put back down to go on.
 - Touchpad tap drags with two and three fingers: tap with them, then touch with as many and move to drag with the right or middle button.
 - Touchpad scroll inertia: with `scroll_inertia_ms`, a quick two-finger scroll goes on after the fingers lift, slowing down.
+- Touchpad pinch zoom: the `zoom_in` and `zoom_out` gestures.
 - Add timer-only processors and combine polling with resettable deadlines through `#[processor]`. Both TOML and Rust projects implement `DeadlineProcessor::deadline()` and `on_deadline()` directly.
 - Macro operations accept any single action (`WM`, `MO`, `OSM`, ...) without the `vial` feature, and a new `pause_for_release` operation (`MacroOp::PauseForRelease`) runs the rest of the macro when the macro key is released
 - PMW3610 `force_awake` now follows the keyboard's sleep state, ZMK style: the sensor is held in RUN while the keyboard is awake and released to its REST modes when the idle sleep starts. `PointingDriver` gained a default-implemented `set_low_power` hint and `PointingDevice` subscribes to `SleepStateEvent`; each sensor in `keyboard.toml` reserves its subscriber slot automatically.

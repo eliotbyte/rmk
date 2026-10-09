@@ -86,7 +86,7 @@ impl Default for TouchGestureConfig {
 }
 
 /// A finger moving this far, in percent of the touchpad's longer side, makes a touch
-/// no tap, and decides what two fingers do.
+/// no tap, and decides between a two-finger scroll and zoom.
 const DECIDE_PERCENT: u8 = 4;
 
 /// A one-finger tap lifts within this many milliseconds of touching, as in libinput.
@@ -100,6 +100,14 @@ const MULTI_FINGER_TAP_MS: u64 = 300;
 /// of the tap, in percent of the touchpad's longer side.
 const TAP_DRAG_DISTANCE_PERCENT: u8 = 8;
 
+/// A zoom needs both fingers moving in opposite directions along the line between
+/// them, on average within this angle: `cos(25°)` in permille.
+const ZOOM_COS_PERMILLE: u32 = 906;
+
+/// How much the distance between the fingers changes per zoom step, in percent of
+/// the touchpad's longer side.
+const ZOOM_STEP_PERCENT: u8 = 6;
+
 /// The recognizer's distances in touchpad units, for one touchpad size.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Px {
@@ -107,6 +115,7 @@ struct Px {
     decide: u32,
     tap_move: u32,
     tap_drag_distance: u32,
+    zoom_step: u32,
 }
 
 impl Px {
@@ -118,6 +127,7 @@ impl Px {
             decide: percent_of(span, DECIDE_PERCENT),
             tap_move: percent_of(span, config.tap_move_percent),
             tap_drag_distance: percent_of(span, TAP_DRAG_DISTANCE_PERCENT),
+            zoom_step: percent_of(span, ZOOM_STEP_PERCENT).max(1),
         }
     }
 }
@@ -197,7 +207,7 @@ struct Touch {
     moved: bool,
     /// The furthest a finger went from where it landed.
     travel: u32,
-    /// Something other than a tap happened: a scroll.
+    /// Something other than a tap happened: a scroll or zoom.
     acted: bool,
 }
 
@@ -321,8 +331,8 @@ enum ScrollAxis {
     Vertical,
 }
 
-/// Where a two-finger touch stands. Once it is a scroll it stays one until it is no
-/// longer exactly two fingers.
+/// Where a two-finger touch stands. Once it is a scroll or a zoom it stays one until
+/// it is no longer exactly two fingers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TwoFinger {
     #[default]
@@ -343,17 +353,21 @@ enum TwoFinger {
     /// Only one of the two fingers moves: it moves the cursor. `last` is where both
     /// were on the last frame. Until `JOIN_MS` after the second finger landed at
     /// `started_ms`, the other setting off from `from` still makes it a scroll if it
-    /// follows.
+    /// follows, or a zoom if it goes the other way along the line between them.
     Pointing {
         finger: usize,
         last: [Point; 2],
         started_ms: u64,
         from: [Point; 2],
     },
+    /// Zooming; `base` is the finger distance at the last zoom step.
+    Zooming {
+        base: u32,
+    },
 }
 
 /// How long after a second finger lands it can still join the moving one for a
-/// scroll: these often start with one finger, the second put down on the way.
+/// scroll or zoom: these often start with one finger, the second put down on the way.
 const JOIN_MS: u64 = 300;
 
 /// How long after a finger lands or lifts beside another the touchpad may still
@@ -703,7 +717,7 @@ impl Recognizer {
                     drag.lead = Drag::any_finger(frame);
                     if scrolls {
                         self.drag = Some(drag);
-                        self.two_fingers(frame, &mut out);
+                        self.two_fingers(frame, &|_| false, &mut out);
                         return out;
                     }
                 }
@@ -712,7 +726,8 @@ impl Recognizer {
                         *travel = u32::MAX;
                     }
                     self.drag = Some(drag);
-                    self.two_fingers(frame, &mut out);
+                    // No zoom while dragging: only scrolling and the cursor.
+                    self.two_fingers(frame, &|_| false, &mut out);
                     return out;
                 }
                 _ => {
@@ -767,7 +782,7 @@ impl Recognizer {
             1 if matches!(self.two_finger, TwoFinger::Scrolling { .. }) => {}
             1 => {
                 self.end_two_fingers(frame.at_ms);
-                // The finger left over from a scroll doesn't move the cursor.
+                // The finger left over from a scroll or zoom doesn't move the cursor.
                 let after_two_fingers = self.touch.is_some_and(|t| t.max_fingers >= 2 && t.acted);
                 // A finger keeps its slot while another lifts, so its motion goes on
                 // without a jump.
@@ -793,7 +808,7 @@ impl Recognizer {
                     self.two_finger = TwoFinger::Scrolling { last: now, axis };
                     return out;
                 }
-                self.two_fingers(frame, &mut out);
+                self.two_fingers(frame, bound, &mut out);
                 if let Some([(Axis::H, h), (Axis::V, v)]) = out.axes {
                     self.previous_ms = previous_ms;
                     self.track_scroll((i32::from(h), i32::from(v)), frame.at_ms);
@@ -865,10 +880,11 @@ impl Recognizer {
         self.two_finger = TwoFinger::Idle;
     }
 
-    fn two_fingers(&mut self, frame: &Frame, out: &mut Output) {
+    fn two_fingers(&mut self, frame: &Frame, bound: &impl Fn(TouchGesture) -> bool, out: &mut Output) {
         let Some(now) = frame.first::<2>() else {
             return;
         };
+        let zoom = bound(TouchGesture::ZoomIn) || bound(TouchGesture::ZoomOut);
         let scroll_axis = |(h, v): Point| {
             if h.abs() > v.abs() {
                 ScrollAxis::Horizontal
@@ -894,11 +910,14 @@ impl Recognizer {
                 started_ms,
                 last,
                 mut sent,
-            } => match classify(start, now, &self.px) {
+            } => match classify(start, now, &self.px, zoom) {
                 // Moving together: a scroll.
                 Some(TwoFingerKind::Scroll) => TwoFinger::Scrolling {
                     last: now,
                     axis: scroll_axis(average(start, now)),
+                },
+                Some(TwoFingerKind::Zoom) => TwoFinger::Zooming {
+                    base: len(sub(start[1], start[0])),
                 },
                 // The rest of its motion moves the cursor too, as long as the other
                 // finger rested; otherwise it has been held back long and would jump.
@@ -956,6 +975,21 @@ impl Recognizer {
                         last: now,
                         axis: scroll_axis(joined),
                     }
+                } else if zoom
+                    && frame.at_ms.saturating_sub(started_ms) <= JOIN_MS
+                    && len(joined) >= self.px.decide / 2
+                    // Not a resting finger drifting while the other moves.
+                    && len(sub(now[other], last[other])) * 3 > len(sub(now[finger], last[finger]))
+                    && [false, true].into_iter().any(|pinch| {
+                        // Spreading, the other finger moves on away from the moving one,
+                        // and the moving one away from it; pinching, the other way.
+                        let towards = sub(from[other], from[finger]);
+                        within_angle(joined, towards, 707, pinch) && within_angle(moved, towards, 707, !pinch)
+                    })
+                {
+                    TwoFinger::Zooming {
+                        base: len(sub(now[1], now[0])),
+                    }
                 } else {
                     out.cursor(sub(now[finger], last[finger]));
                     TwoFinger::Pointing {
@@ -966,8 +1000,25 @@ impl Recognizer {
                     }
                 }
             }
+            zooming @ TwoFinger::Zooming { .. } => zooming,
         };
         self.two_finger = next;
+        // At most one zoom step per frame; the rest follow on the next frames.
+        if let TwoFinger::Zooming { base } = &mut self.two_finger {
+            let distance = len(sub(now[1], now[0]));
+            let step = self.px.zoom_step;
+            if distance >= *base + step {
+                *base += step;
+                if bound(TouchGesture::ZoomIn) {
+                    out.tap(TouchGesture::ZoomIn);
+                }
+            } else if distance + step <= *base {
+                *base -= step;
+                if bound(TouchGesture::ZoomOut) {
+                    out.tap(TouchGesture::ZoomOut);
+                }
+            }
+        }
         // Moving the cursor with one of two fingers is no gesture.
         if !matches!(
             self.two_finger,
@@ -982,14 +1033,16 @@ impl Recognizer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TwoFingerKind {
     Scroll,
+    Zoom,
     /// Only this finger moves.
     Point(usize),
 }
 
-/// Tell a two-finger touch that moved from `start` to `now` apart: a scroll when both
-/// move the same way at a similar speed, a cursor move when only one moves, or `None`
-/// while that is still unclear.
-fn classify(start: [Point; 2], now: [Point; 2], px: &Px) -> Option<TwoFingerKind> {
+/// Tell a two-finger touch that moved from `start` to `now` apart: a zoom when both
+/// fingers move in opposite directions along the line between them, a scroll when
+/// both move the same way at a similar speed, a cursor move when only one moves, or
+/// `None` while that is still unclear.
+fn classify(start: [Point; 2], now: [Point; 2], px: &Px, zoom: bool) -> Option<TwoFingerKind> {
     let d1 = sub(now[0], start[0]);
     let d2 = sub(now[1], start[1]);
     let (l1, l2) = (len(d1), len(d2));
@@ -1002,6 +1055,15 @@ fn classify(start: [Point; 2], now: [Point; 2], px: &Px) -> Option<TwoFingerKind
     // Both moving, neither more than three times as fast: a finger resting while the
     // other moves drifts a little, and that's no gesture of two fingers.
     let both_move = slow >= px.decide / 4 && slow * 3 >= fast;
+    // Fingers spreading or pinching move along arcs, so it is their motion together
+    // that has to change the distance between them: by as much as moving within the
+    // angle along the line between them would.
+    let axis = sub(start[1], start[0]);
+    let spread = (dot(d2, axis) - dot(d1, axis)) / i64::from(len(axis).max(1));
+    let cos = u64::from(ZOOM_COS_PERMILLE);
+    if zoom && both_move && spread.unsigned_abs() * 1000 >= u64::from(travel) * cos {
+        return Some(TwoFingerKind::Zoom);
+    }
     // Both moving within 45° of each other.
     if both_move && within_angle(d1, d2, 707, false) {
         return Some(TwoFingerKind::Scroll);
@@ -1168,7 +1230,7 @@ impl Runnable for TouchGestureProcessor<'_> {
 mod tests {
     use super::*;
 
-    /// A 1000-unit touchpad: deciding at 40.
+    /// A 1000-unit touchpad: deciding at 40, a zoom step every 60.
     const SIZE: (u16, u16) = (1000, 1000);
 
     fn bound(_: TouchGesture) -> bool {
@@ -1252,7 +1314,7 @@ mod tests {
             TouchAction::transparent(),
         ];
         assert!(super::bound(&layers, 0, Tap));
-        assert!(!super::bound(&layers, 0, ThreeFingerTap));
+        assert!(!super::bound(&layers, 0, ZoomIn));
         // Transparent on layers 1 and 2: layer 0's action.
         assert!(super::bound(&layers, 2, Tap));
         // Taken away on layer 1, so on layer 2 too.
@@ -1790,7 +1852,7 @@ mod tests {
             one(100, (100, 100)),
             Step::Timeout(280), // rested: a drag
             two(310, (100, 100), (300, 300)),
-            two(370, (100, 160), (300, 360)), // both move: a scroll
+            two(370, (100, 160), (300, 360)), // both move: a scroll, no zoom
             two(380, (100, 170), (300, 370)),
             one(390, (100, 175)), // back to one finger: no jump
             one(400, (110, 175)),
@@ -2053,7 +2115,81 @@ mod tests {
     }
 
     #[test]
-    fn a_finger_moving_away_from_a_drifting_one_moves_the_cursor() {
+    fn two_fingers_moving_apart_along_their_line_zoom_in() {
+        let (outs, _) = run(&[
+            two(0, (400, 500), (600, 500)),  // 200 apart
+            two(10, (380, 501), (620, 499)), // decided: opposite, along the line; 240
+            two(20, (340, 500), (660, 500)), // 320: a step past 200 + 60
+            two(30, (345, 500), (655, 500)), // 310: short of the next at 320
+        ]);
+        assert!(axes(&outs).is_empty());
+        assert_eq!(keys(&outs), tapped(ZoomIn));
+    }
+
+    #[test]
+    fn two_fingers_pinching_zoom_out() {
+        let (outs, _) = run(&[
+            two(0, (300, 500), (700, 500)),  // 400 apart
+            two(10, (330, 500), (670, 500)), // decided; 340: a step below 400 - 60
+            two(20, (340, 500), (660, 500)), // 320: short of the next at 280
+        ]);
+        assert_eq!(keys(&outs), tapped(ZoomOut));
+    }
+
+    #[test]
+    fn fingers_spreading_along_arcs_zoom() {
+        // From a recording on a TPS43: one finger moved about 28° off the line
+        // between them, more than the 25° each finger used to need.
+        let outs = replay(&[
+            (1037249, Some((1611, 1105)), Some((830, 1674))),
+            (1037256, Some((1615, 1099)), Some((830, 1674))),
+            (1037271, Some((1619, 1092)), Some((827, 1676))),
+            (1037286, Some((1624, 1082)), Some((821, 1680))),
+            (1037294, Some((1629, 1070)), Some((807, 1690))),
+            (1037309, Some((1634, 1060)), Some((785, 1706))),
+            (1037316, Some((1637, 1051)), Some((760, 1724))),
+            (1037331, Some((1640, 1043)), Some((734, 1743))),
+            (1037346, Some((1644, 1034)), Some((702, 1768))),
+            (1037354, Some((1649, 1023)), Some((669, 1795))),
+            (1037369, Some((1654, 1013)), Some((645, 1815))),
+        ]);
+        assert_eq!(keys(&outs), [tapped(ZoomIn), tapped(ZoomIn)].concat());
+    }
+
+    #[test]
+    fn a_zoom_can_start_with_one_finger_the_second_joining() {
+        // From a recording on a TPS43: the first finger moves on as the second lands
+        // and rests, so it moves the cursor, until the second sets off the other way.
+        let outs = replay(&[
+            (1035568, Some((1510, 1090)), None),
+            (1035576, Some((1513, 1082)), Some((654, 1786))),
+            (1035591, Some((1517, 1072)), Some((654, 1786))),
+            (1035599, Some((1532, 1049)), Some((654, 1786))),
+            (1035614, Some((1552, 1021)), Some((654, 1786))),
+            (1035637, Some((1571, 996)), Some((654, 1786))),
+            (1035638, Some((1585, 973)), Some((655, 1785))),
+            (1035658, Some((1597, 954)), Some((656, 1784))),
+            (1035660, Some((1610, 932)), Some((655, 1784))),
+            (1035674, Some((1623, 906)), Some((654, 1784))),
+            (1035696, Some((1637, 877)), Some((650, 1785))),
+            (1035698, Some((1650, 845)), Some((645, 1787))),
+            (1035711, Some((1663, 805)), Some((638, 1789))),
+            (1035719, Some((1674, 766)), Some((631, 1791))),
+            (1035734, Some((1682, 739)), Some((622, 1794))),
+            (1035749, Some((1687, 723)), Some((610, 1795))),
+            (1035756, Some((1690, 714)), Some((595, 1799))),
+            (1035772, Some((1692, 708)), Some((574, 1807))),
+            (1035794, Some((1693, 704)), Some((553, 1816))),
+            (1035796, Some((1695, 701)), Some((526, 1828))),
+            (1035809, Some((1696, 699)), Some((499, 1840))),
+            (1035816, Some((1697, 696)), Some((482, 1849))),
+            (1035831, Some((1698, 694)), Some((468, 1855))),
+        ]);
+        assert_eq!(keys(&outs), tapped(ZoomIn));
+    }
+
+    #[test]
+    fn a_finger_moving_away_from_a_drifting_one_is_no_zoom() {
         // As recorded on a TPS43: one finger rests but drifts slowly away, while the
         // other moves away from it ten times as fast.
         let steps: Vec<_> = (0..=10)
@@ -2065,7 +2201,7 @@ mod tests {
     }
 
     #[test]
-    fn a_resting_finger_setting_off_across_the_line_keeps_pointing() {
+    fn a_resting_finger_moving_across_the_line_doesnt_turn_pointing_into_a_zoom() {
         let (outs, recognizer) = run(&[
             two(0, (400, 500), (600, 500)),
             two(10, (400, 500), (650, 500)), // the second finger moves the cursor
@@ -2073,6 +2209,32 @@ mod tests {
         ]);
         assert!(keys(&outs).is_empty());
         assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { finger: 1, .. }));
+    }
+
+    #[test]
+    fn opposite_but_across_the_line_is_not_a_zoom() {
+        // Rotating: the fingers move apart from each other's path, not along it.
+        let (outs, recognizer) = run(&[two(0, (400, 500), (600, 500)), two(10, (400, 470), (600, 530))]);
+        assert!(keys(&outs).is_empty());
+        assert!(!matches!(recognizer.two_finger, TwoFinger::Zooming { .. }));
+    }
+
+    #[test]
+    fn one_finger_still_is_not_a_zoom() {
+        let (outs, recognizer) = run(&[two(0, (400, 500), (600, 500)), two(10, (400, 500), (650, 500))]);
+        assert!(keys(&outs).is_empty());
+        assert!(matches!(recognizer.two_finger, TwoFinger::Pointing { finger: 1, .. }));
+    }
+
+    #[test]
+    fn without_zoom_actions_spreading_fingers_dont_zoom() {
+        let (outs, recognizer) = run_with(
+            TouchGestureConfig::default(),
+            |g| !matches!(g, ZoomIn | ZoomOut),
+            &[two(0, (400, 500), (600, 500)), two(10, (380, 501), (620, 499))],
+        );
+        assert!(keys(&outs).is_empty());
+        assert!(!matches!(recognizer.two_finger, TwoFinger::Zooming { .. }));
     }
 
     #[test]
@@ -2087,14 +2249,19 @@ mod tests {
 
     #[test]
     fn a_scroll_stays_a_scroll_until_the_fingers_lift() {
-        let (outs, recognizer) = run(&[
+        let (outs, _) = run(&[
             two(0, (400, 500), (600, 500)),
             two(10, (400, 540), (600, 540)), // scrolling
-            two(20, (350, 540), (650, 540)), // fingers spread: still a scroll, by zero
+            two(20, (350, 540), (650, 540)), // fingers spread: still scrolls
             two(30, (300, 540), (700, 540)),
+            lift(40),
+            two(100, (400, 500), (600, 500)),
+            two(110, (350, 500), (650, 500)), // a new touch zooms: 300, past 260
+            two(120, (345, 500), (655, 500)),
         ]);
-        assert!(keys(&outs).is_empty() && axes(&outs).is_empty());
-        assert!(matches!(recognizer.two_finger, TwoFinger::Scrolling { .. }));
+        // The spread mid-scroll scrolls by zero and doesn't zoom; only the new touch does.
+        assert_eq!(keys(&outs), tapped(ZoomIn));
+        assert!(axes(&outs).is_empty());
     }
 
     #[test]
@@ -2182,5 +2349,6 @@ mod tests {
     fn distances_are_a_share_of_the_touchpad() {
         let px = Px::new(&TouchGestureConfig::default(), (2000, 1000));
         assert_eq!(px.decide, 80);
+        assert_eq!(px.zoom_step, 120);
     }
 }

@@ -863,13 +863,13 @@ mod tests {
 
     #[test]
     fn touch_actions_resolve_per_touchpad_with_gestures() {
-        let keymap = touchpad_config("touch = [{ tap = \"@click\", three_finger_tap = \"WM(Equal, LCtrl)\" }]")
+        let keymap = touchpad_config("touch = [{ tap = \"@click\", zoom_in = \"WM(Equal, LCtrl)\" }]")
             .keymap()
             .unwrap();
         assert_eq!(keymap.num_touchpad, 1);
         let pad = &keymap.touch_map[0][0];
         assert_eq!(pad.tap.as_deref(), Some("MouseBtn1"));
-        assert_eq!(pad.three_finger_tap.as_deref(), Some("WM(Equal, LCtrl)"));
+        assert_eq!(pad.zoom_in.as_deref(), Some("WM(Equal, LCtrl)"));
         assert_eq!(pad.two_finger_tap, None);
     }
 

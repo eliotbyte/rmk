@@ -125,7 +125,7 @@ Kp1     Kp2     Kp3        Enter
 encoders = [["AudioVolUp", "AudioVolDown"]]
 # Per-layer touchpad gesture actions, one table per trackpad with `gestures` configured.
 # Optional: a gesture a layer leaves out takes its action from the layer below. See the IQS5xx page
-# touch = [{ tap = "MouseBtn1", two_finger_tap = "MouseBtn2", three_finger_tap = "MouseBtn3" }]
+# touch = [{ tap = "MouseBtn1", two_finger_tap = "MouseBtn2", zoom_in = "WM(Equal, LCtrl)" }]
 
 # layer 1:
 [[keymap.layer]]
