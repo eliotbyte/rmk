@@ -10,7 +10,7 @@ trackpad modules.
   need the [Rust API](#rust-configuration).
 - Without [gestures](#gestures), only relative single-finger cursor movement
   is reported. With them, the positions of up to five fingers are, and RMK
-  recognizes taps and two-finger scrolling from them. Raw channel data is
+  recognizes taps, drags and two-finger scrolling from them. Raw channel data is
   not read.
 - Use [Sniper mode](./pointing_processor#sniper) to reduce cursor sensitivity.
 - An `RDY` (ready) pin is strongly recommended. Without it, the driver falls
@@ -76,6 +76,8 @@ name = "trackpad0"
 # natural_scroll = false    # content follows the fingers, as on a phone
 # tap_move_percent = 3      # a tap moves at most this far (in % of the trackpad); more is a cursor move
 # tap_min_ms = 0            # a tap lasts at least this long; shorter is a graze, e.g. 20
+# tap_drag_ms = 180         # a touch starting this soon after a tap drags; a tap clicks
+#                           # once this has passed. 0 turns tap drags off, so taps click at once
 ```
 
 What each gesture does is set per layer in `[[keymap.layer]]`, like encoders,
@@ -91,6 +93,7 @@ touch = [{ tap = "MouseBtn1", two_finger_tap = "MouseBtn2", three_finger_tap = "
 | Gesture | Recognized when |
 |---|---|
 | `tap`, `two_finger_tap`, `three_finger_tap` | The fingers touch and lift without moving, within 180 ms for one finger and 300 ms for more |
+| `tap`, held | One finger touches within `tap_drag_ms` of a tap lifting, close to it, and moves or rests: the tap becomes a drag, its action pressed until the finger lifts. Tap, then touch and move drags; two quick taps double-click; tap, tap, touch and move double-clicks and drags. A tap waits out `tap_drag_ms` before it clicks. During the drag another finger can take over when the first runs out of room. |
 
 A gesture with no action on the active layer isn't recognized there at all.
 

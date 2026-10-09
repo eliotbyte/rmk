@@ -207,12 +207,14 @@ fn expand_touch_gesture_config(
     let touchpad_id = u8::try_from(touchpad_id).expect("at most 256 touchpads");
     let tap_move_percent = gestures.tap_move_percent.unwrap_or(3);
     let tap_min_ms = gestures.tap_min_ms.unwrap_or(0);
+    let tap_drag_ms = gestures.tap_drag_ms.unwrap_or(180);
     quote! {
         ::rmk::input_device::touch::TouchGestureConfig {
             device_id: #device_id,
             touchpad_id: #touchpad_id,
             tap_move_percent: #tap_move_percent,
             tap_min_ms: #tap_min_ms,
+            tap_drag_ms: #tap_drag_ms,
         }
     }
 }
