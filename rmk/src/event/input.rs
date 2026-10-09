@@ -6,7 +6,7 @@
 //! - Pointing device events (mouse, trackball, etc.)
 
 use postcard::experimental::max_size::MaxSize;
-use rmk_macro::event;
+use rmk_macro::{Event, event};
 use rmk_types::modifier::ModifierCombination;
 use serde::{Deserialize, Serialize};
 
@@ -198,6 +198,14 @@ pub struct TouchEvent {
 pub struct TouchContact {
     pub x: u16,
     pub y: u16,
+}
+
+/// What a touchpad publishes: cursor motion it computes itself, or raw
+/// [`TouchEvent`]s for a touch processor to turn into motion and gestures.
+#[derive(Event, Clone, Debug)]
+pub enum TouchpadEvent {
+    Pointing(PointingEvent),
+    Touch(TouchEvent),
 }
 
 /// Set the CPI (Resolution) of the pointing device
