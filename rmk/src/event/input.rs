@@ -167,6 +167,39 @@ pub enum Axis {
     // .. More is allowed
 }
 
+/// Contacts a [`TouchEvent`] carries.
+pub const TOUCH_MAX_CONTACTS: usize = 5;
+
+/// One scan of a multi-touch device such as a trackpad: where each contact is.
+///
+/// Raw data, local to the board the device is on: a touch processor there turns it
+/// into pointing events and gestures, and only those cross the split link. A device
+/// publishes one per scan while something touches, and one without contacts when
+/// the last lifts. Contacts are kept by slot, as in Linux's multi-touch protocol B.
+#[event(
+    channel_size = crate::TOUCH_EVENT_CHANNEL_SIZE,
+    pubs = crate::TOUCH_EVENT_PUB_SIZE,
+    subs = crate::TOUCH_EVENT_SUB_SIZE
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct TouchEvent {
+    /// The id of the pointing device that produced this scan.
+    pub device_id: u8,
+    /// The largest x and y the device reports.
+    pub max: (u16, u16),
+    /// Contacts by slot. A contact keeps its slot until it lifts.
+    pub contacts: [Option<TouchContact>; TOUCH_MAX_CONTACTS],
+}
+
+/// Where a contact is on a touch device, from its top-left corner.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct TouchContact {
+    pub x: u16,
+    pub y: u16,
+}
+
 /// Set the CPI (Resolution) of the pointing device
 /// TODO: Make the channel size configurable
 #[event(channel_size = 8, pubs = 2, subs = 2)]
