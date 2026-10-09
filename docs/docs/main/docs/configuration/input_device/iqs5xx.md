@@ -80,6 +80,8 @@ name = "trackpad0"
 #                           # once this has passed. 0 turns tap drags off, so taps click at once
 # drag_lock_ms = 0          # a drag lasts this long after the fingers lift, so a finger put
 #                           # back down goes on with it; a quick tap ends it. 300 is a good start
+# scroll_inertia_ms = 0     # a quick two-finger scroll goes on after lifting, slowing down with
+#                           # this time constant; a touch stops it. 300-500 is a good start
 ```
 
 What each gesture does is set per layer in `[[keymap.layer]]`, like encoders,

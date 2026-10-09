@@ -209,6 +209,7 @@ fn expand_touch_gesture_config(
     let tap_min_ms = gestures.tap_min_ms.unwrap_or(0);
     let tap_drag_ms = gestures.tap_drag_ms.unwrap_or(180);
     let drag_lock_ms = gestures.drag_lock_ms.unwrap_or(0);
+    let scroll_inertia_ms = gestures.scroll_inertia_ms.unwrap_or(0);
     quote! {
         ::rmk::input_device::touch::TouchGestureConfig {
             device_id: #device_id,
@@ -217,6 +218,7 @@ fn expand_touch_gesture_config(
             tap_min_ms: #tap_min_ms,
             tap_drag_ms: #tap_drag_ms,
             drag_lock_ms: #drag_lock_ms,
+            scroll_inertia_ms: #scroll_inertia_ms,
         }
     }
 }

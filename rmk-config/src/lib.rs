@@ -1472,6 +1472,9 @@ pub struct TouchGesturesConfig {
     /// finger put back down goes on with it; a quick still tap ends it at once. Off
     /// (0) by default.
     pub drag_lock_ms: Option<u16>,
+    /// A two-finger scroll that ends quickly goes on, slowing down with this time
+    /// constant in milliseconds, until a finger touches. Off (0) by default.
+    pub scroll_inertia_ms: Option<u16>,
 }
 
 /// I²C bus configuration for the IQS5xx. Distinct from the generic `I2cConfig`
