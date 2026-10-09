@@ -66,7 +66,7 @@ pub use dfu::{DfuCmdEvent, DfuStatusEvent};
 pub use dongle::{DongleState, DongleStateEvent};
 pub use input::{
     Axis, AxisEvent, AxisValType, KeyPos, KeyboardEvent, KeyboardEventPos, ModifierEvent, PointingEvent,
-    PointingProcessorEvent, PointingSetCpiEvent, RotaryEncoderPos,
+    PointingProcessorEvent, PointingSetCpiEvent, RotaryEncoderPos, TOUCH_MAX_CONTACTS, TouchContact, TouchEvent,
 };
 #[cfg(all(feature = "split", feature = "_ble"))]
 pub use split::ClearPeerEvent;
