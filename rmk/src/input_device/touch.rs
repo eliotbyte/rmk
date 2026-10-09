@@ -10,7 +10,8 @@
 //!   in the keymap's touch map, per layer like encoders.
 //!
 //! Only these cross the split link. A gesture without an action on the active layer
-//! is not recognized at all. The processor follows the active layer through
+//! is not recognized at all, so two fingers moving sideways scroll on a layer
+//! without two-finger swipes. The processor follows the active layer through
 //! [`LayerChangeEvent`]s, and gets its touchpad's actions per layer when built.
 //!
 //! A tap waits out a short window before it clicks, in case another touch follows:
@@ -52,6 +53,10 @@ pub struct TouchGestureConfig {
     pub device_id: u8,
     /// The touchpad's index in the touch map.
     pub touchpad_id: u8,
+    /// The same as the PointingProcessor's, so that swipe directions are the cursor's.
+    pub invert_x: bool,
+    pub invert_y: bool,
+    pub swap_xy: bool,
     /// A one-finger tap moves at most this far, in percent of the touchpad's longer
     /// side; more is a cursor move.
     pub tap_move_percent: u8,
@@ -76,6 +81,9 @@ impl Default for TouchGestureConfig {
         Self {
             device_id: 0,
             touchpad_id: 0,
+            invert_x: false,
+            invert_y: false,
+            swap_xy: false,
             tap_move_percent: 3,
             tap_min_ms: 0,
             tap_drag_ms: 180,
@@ -108,6 +116,19 @@ const ZOOM_COS_PERMILLE: u32 = 906;
 /// the touchpad's longer side.
 const ZOOM_STEP_PERCENT: u8 = 6;
 
+/// How far both fingers move together for a two-finger swipe, and three for a
+/// three-finger swipe, in percent of the touchpad's size in the swipe's direction.
+const SWIPE_PERCENT: u8 = 10;
+const THREE_FINGER_SWIPE_PERCENT: u8 = 15;
+
+/// A two-finger swipe lifts within this many milliseconds of touching; a longer move
+/// scrolls.
+const SWIPE_MS: u64 = 250;
+
+/// A two- or three-finger swipe keeps within this angle of its axis: `cos(30°)` in
+/// permille.
+const SWIPE_COS_PERMILLE: u32 = 866;
+
 /// The recognizer's distances in touchpad units, for one touchpad size.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Px {
@@ -116,19 +137,35 @@ struct Px {
     tap_move: u32,
     tap_drag_distance: u32,
     zoom_step: u32,
+    /// Swipe distances along X and along Y: two fingers side by side have far less
+    /// room across a touchpad's short side than a share of its long side.
+    swipe: [u32; 2],
+    three_finger_swipe: [u32; 2],
 }
 
 impl Px {
     fn new(config: &TouchGestureConfig, size: (u16, u16)) -> Self {
         let percent_of = |span: u16, percent: u8| u32::from(span) * u32::from(percent) / 100;
         let span = size.0.max(size.1);
+        let per_axis = |percent| [size.0, size.1].map(|side| percent_of(side, percent).max(1));
         Self {
             size,
             decide: percent_of(span, DECIDE_PERCENT),
             tap_move: percent_of(span, config.tap_move_percent),
             tap_drag_distance: percent_of(span, TAP_DRAG_DISTANCE_PERCENT),
             zoom_step: percent_of(span, ZOOM_STEP_PERCENT).max(1),
+            swipe: per_axis(SWIPE_PERCENT),
+            three_finger_swipe: per_axis(THREE_FINGER_SWIPE_PERCENT),
         }
+    }
+
+    /// The swipe distance along `dir`, a unit vector on one axis.
+    fn swipe_along(&self, dir: Point) -> u32 {
+        self.swipe[usize::from(dir.0 == 0)]
+    }
+
+    fn three_finger_swipe_along(&self, dir: Point) -> u32 {
+        self.three_finger_swipe[usize::from(dir.0 == 0)]
     }
 }
 
@@ -207,7 +244,7 @@ struct Touch {
     moved: bool,
     /// The furthest a finger went from where it landed.
     travel: u32,
-    /// Something other than a tap happened: a scroll or zoom.
+    /// Something other than a tap happened: a scroll, zoom or swipe.
     acted: bool,
 }
 
@@ -364,6 +401,27 @@ enum TwoFinger {
     Zooming {
         base: u32,
     },
+    /// Moving together along `dir`, which has a two-finger swipe, since `started_ms`.
+    /// The motion is held back until it turns out to be a flick, lifted quickly after
+    /// moving far enough (`gesture` fires), or a scroll.
+    Flicking {
+        start: [Point; 2],
+        last: [Point; 2],
+        started_ms: u64,
+        dir: Point,
+        gesture: TouchGesture,
+    },
+}
+
+/// Where the three-finger part of a touch stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ThreeFinger {
+    #[default]
+    Idle,
+    /// Three fingers down since `start`.
+    Tracking { start: [Point; 3] },
+    /// A three-finger swipe fired; nothing more until the fingers lift.
+    Swiped,
 }
 
 /// How long after a second finger lands it can still join the moving one for a
@@ -373,6 +431,9 @@ const JOIN_MS: u64 = 300;
 /// How long after a finger lands or lifts beside another the touchpad may still
 /// report one point between them, gliding there and back.
 const GLIDE_MS: u64 = 50;
+
+/// The directions of swipes on the touchpad, before the cursor transforms.
+const DIRECTIONS: [Point; 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 
 /// Gesture recognition, apart from the event plumbing so it can be tested on its own.
 #[derive(Debug)]
@@ -396,6 +457,7 @@ struct Recognizer {
     glide: [Point; TOUCH_MAX_FINGERS],
     count_changed_ms: Option<u64>,
     two_finger: TwoFinger,
+    three_finger: ThreeFinger,
 }
 
 impl Recognizer {
@@ -414,6 +476,7 @@ impl Recognizer {
             glide: [(0, 0); TOUCH_MAX_FINGERS],
             count_changed_ms: None,
             two_finger: TwoFinger::Idle,
+            three_finger: ThreeFinger::Idle,
         }
     }
 
@@ -445,6 +508,31 @@ impl Recognizer {
             }
         }
         frame
+    }
+
+    /// The gesture a swipe along `dir` on the touchpad makes, as the cursor moves.
+    fn swipe_gesture(&self, dir: Point, fingers: u8) -> TouchGesture {
+        let (mut x, mut y) = dir;
+        if self.config.invert_x {
+            x = -x;
+        }
+        if self.config.invert_y {
+            y = -y;
+        }
+        if self.config.swap_xy {
+            (x, y) = (y, x);
+        }
+        let two = fingers == 2;
+        match (x, y) {
+            (-1, _) if two => TouchGesture::TwoFingerSwipeLeft,
+            (1, _) if two => TouchGesture::TwoFingerSwipeRight,
+            (_, -1) if two => TouchGesture::TwoFingerSwipeUp,
+            _ if two => TouchGesture::TwoFingerSwipeDown,
+            (-1, _) => TouchGesture::ThreeFingerSwipeLeft,
+            (1, _) => TouchGesture::ThreeFingerSwipeRight,
+            (_, -1) => TouchGesture::ThreeFingerSwipeUp,
+            _ => TouchGesture::ThreeFingerSwipeDown,
+        }
     }
 
     /// When something happens without a frame: a touch after a tap resting long
@@ -686,7 +774,7 @@ impl Recognizer {
             // alone moves the cursor, so another finger can take over.
             let two_fingers = frame.count >= 2 && drag.lifted_ms.is_none() && !multi_finger;
             if !two_fingers && self.two_finger != TwoFinger::Idle {
-                self.end_two_fingers(frame.at_ms);
+                self.end_two_fingers(frame.at_ms, &mut out);
                 drag.lead = Drag::any_finger(frame);
                 if frame.count > 0 {
                     self.drag = Some(drag);
@@ -726,7 +814,7 @@ impl Recognizer {
                         *travel = u32::MAX;
                     }
                     self.drag = Some(drag);
-                    // No zoom while dragging: only scrolling and the cursor.
+                    // No zoom or swipes while dragging: only scrolling and the cursor.
                     self.two_fingers(frame, &|_| false, &mut out);
                     return out;
                 }
@@ -769,10 +857,11 @@ impl Recognizer {
             }
         }
 
-        // Three fingers: a tap, and nothing else for the rest of the touch, so fingers
-        // landing or lifting one by one don't move the cursor or scroll.
+        // Three fingers: a tap or a swipe, and nothing else for the rest of the touch, so
+        // fingers landing or lifting one by one don't move the cursor or scroll.
         if self.touch.is_some_and(|t| t.max_fingers >= 3) {
             self.two_finger = TwoFinger::Idle;
+            self.three_fingers(frame, bound, &mut out);
             return out;
         }
 
@@ -781,7 +870,8 @@ impl Recognizer {
             // put back.
             1 if matches!(self.two_finger, TwoFinger::Scrolling { .. }) => {}
             1 => {
-                self.end_two_fingers(frame.at_ms);
+                // Leaving two fingers may end a flick.
+                self.end_two_fingers(frame.at_ms, &mut out);
                 // The finger left over from a scroll or zoom doesn't move the cursor.
                 let after_two_fingers = self.touch.is_some_and(|t| t.max_fingers >= 2 && t.acted);
                 // A finger keeps its slot while another lifts, so its motion goes on
@@ -824,11 +914,13 @@ impl Recognizer {
         self.touch = None;
         self.drag = None;
         self.two_finger = TwoFinger::Idle;
+        self.three_finger = ThreeFinger::Idle;
     }
 
-    /// The last finger lifted: a tap if the touch was short and still.
+    /// The last finger lifted: a tap if the touch was short and still, or the end of
+    /// a flick.
     fn lift(&mut self, at_ms: u64, bound: &impl Fn(TouchGesture) -> bool, out: &mut Output) {
-        self.end_two_fingers(at_ms);
+        self.end_two_fingers(at_ms, out);
         let Some(touch) = self.touch else {
             return;
         };
@@ -863,8 +955,21 @@ impl Recognizer {
         }
     }
 
-    /// No longer two fingers: a quick scroll goes on with inertia.
-    fn end_two_fingers(&mut self, at_ms: u64) {
+    /// No longer two fingers: a flick fires if it was lifted soon after touching, far
+    /// enough along its swipe.
+    fn end_two_fingers(&mut self, at_ms: u64, out: &mut Output) {
+        if let TwoFinger::Flicking {
+            start,
+            last,
+            started_ms,
+            dir,
+            gesture,
+        } = self.two_finger
+            && at_ms.saturating_sub(started_ms) <= SWIPE_MS
+            && dot(average(start, last), dir) >= i64::from(self.px.swipe_along(dir))
+        {
+            out.tap(gesture);
+        }
         let start = u32::from(self.px.size.0.max(self.px.size.1)) * INERTIA_START_PERCENT_PER_S / 100;
         if matches!(self.two_finger, TwoFinger::Scrolling { .. })
             && self.config.scroll_inertia_ms > 0
@@ -878,6 +983,36 @@ impl Recognizer {
             });
         }
         self.two_finger = TwoFinger::Idle;
+    }
+
+    fn three_fingers(&mut self, frame: &Frame, bound: &impl Fn(TouchGesture) -> bool, out: &mut Output) {
+        let Some(now) = frame.first::<3>().filter(|_| frame.count == 3) else {
+            return;
+        };
+        self.three_finger = match self.three_finger {
+            ThreeFinger::Idle => ThreeFinger::Tracking { start: now },
+            ThreeFinger::Tracking { start } => {
+                let moved_by = average3(start, now);
+                let swipe = DIRECTIONS.into_iter().find_map(|dir| {
+                    let gesture = self.swipe_gesture(dir, 3);
+                    (bound(gesture)
+                        && within_angle(moved_by, dir, SWIPE_COS_PERMILLE, false)
+                        && dot(moved_by, dir) >= i64::from(self.px.three_finger_swipe_along(dir)))
+                    .then_some(gesture)
+                });
+                match swipe {
+                    Some(gesture) => {
+                        out.tap(gesture);
+                        if let Some(touch) = &mut self.touch {
+                            touch.acted = true;
+                        }
+                        ThreeFinger::Swiped
+                    }
+                    None => ThreeFinger::Tracking { start },
+                }
+            }
+            ThreeFinger::Swiped => ThreeFinger::Swiped,
+        };
     }
 
     fn two_fingers(&mut self, frame: &Frame, bound: &impl Fn(TouchGesture) -> bool, out: &mut Output) {
@@ -911,11 +1046,28 @@ impl Recognizer {
                 last,
                 mut sent,
             } => match classify(start, now, &self.px, zoom) {
-                // Moving together: a scroll.
-                Some(TwoFingerKind::Scroll) => TwoFinger::Scrolling {
-                    last: now,
-                    axis: scroll_axis(average(start, now)),
-                },
+                // Moving together: maybe a swipe if that way has one, a scroll otherwise.
+                Some(TwoFingerKind::Scroll) => {
+                    let moved = average(start, now);
+                    let swipe = DIRECTIONS.into_iter().find_map(|dir| {
+                        let gesture = self.swipe_gesture(dir, 2);
+                        (bound(gesture) && within_angle(moved, dir, SWIPE_COS_PERMILLE, false))
+                            .then_some((dir, gesture))
+                    });
+                    match swipe {
+                        Some((dir, gesture)) => TwoFinger::Flicking {
+                            start,
+                            last: now,
+                            started_ms,
+                            dir,
+                            gesture,
+                        },
+                        None => TwoFinger::Scrolling {
+                            last: now,
+                            axis: scroll_axis(moved),
+                        },
+                    }
+                }
                 Some(TwoFingerKind::Zoom) => TwoFinger::Zooming {
                     base: len(sub(start[1], start[0])),
                 },
@@ -997,6 +1149,30 @@ impl Recognizer {
                         last: now,
                         started_ms,
                         from,
+                    }
+                }
+            }
+            TwoFinger::Flicking {
+                start,
+                started_ms,
+                dir,
+                gesture,
+                ..
+            } => {
+                let moved = average(start, now);
+                let slow = frame.at_ms.saturating_sub(started_ms) > SWIPE_MS;
+                if slow || !within_angle(moved, dir, SWIPE_COS_PERMILLE, false) {
+                    // Too slow or off the swipe's line: a scroll, caught up on the held-back motion.
+                    let axis = scroll_axis(moved);
+                    scroll(common(start, now), axis, out);
+                    TwoFinger::Scrolling { last: now, axis }
+                } else {
+                    TwoFinger::Flicking {
+                        start,
+                        last: now,
+                        started_ms,
+                        dir,
+                        gesture,
                     }
                 }
             }
@@ -1111,6 +1287,12 @@ fn clamp16(x: i32) -> i16 {
 fn average(from: [Point; 2], to: [Point; 2]) -> Point {
     let (d1, d2) = (sub(to[0], from[0]), sub(to[1], from[1]));
     ((d1.0 + d2.0) / 2, (d1.1 + d2.1) / 2)
+}
+
+/// The average motion of three fingers from `from` to `to`.
+fn average3(from: [Point; 3], to: [Point; 3]) -> Point {
+    let d = [0, 1, 2].map(|i| sub(to[i], from[i]));
+    ((d[0].0 + d[1].0 + d[2].0) / 3, (d[0].1 + d[1].1 + d[2].1) / 3)
 }
 
 /// Whether the angle between `a` and `b` is within the one whose cosine is
@@ -1230,11 +1412,17 @@ impl Runnable for TouchGestureProcessor<'_> {
 mod tests {
     use super::*;
 
-    /// A 1000-unit touchpad: deciding at 40, a zoom step every 60.
+    /// A 1000-unit touchpad: deciding at 40, a zoom step every 60, a two-finger swipe of
+    /// 100 and a three-finger swipe of 150.
     const SIZE: (u16, u16) = (1000, 1000);
 
-    fn bound(_: TouchGesture) -> bool {
-        true
+    /// Every gesture but vertical two-finger swipes, so vertical two-finger motion
+    /// still scrolls.
+    fn bound(gesture: TouchGesture) -> bool {
+        !matches!(
+            gesture,
+            TouchGesture::TwoFingerSwipeUp | TouchGesture::TwoFingerSwipeDown
+        )
     }
 
     enum Step {
@@ -1852,7 +2040,7 @@ mod tests {
             one(100, (100, 100)),
             Step::Timeout(280), // rested: a drag
             two(310, (100, 100), (300, 300)),
-            two(370, (100, 160), (300, 360)), // both move: a scroll, no zoom
+            two(370, (100, 160), (300, 360)), // both move: a scroll, no zoom or swipe
             two(380, (100, 170), (300, 370)),
             one(390, (100, 175)), // back to one finger: no jump
             one(400, (110, 175)),
@@ -2265,6 +2453,98 @@ mod tests {
     }
 
     #[test]
+    fn a_quick_sideways_flick_swipes_when_the_fingers_lift() {
+        let (outs, _) = run(&[
+            two(0, (700, 500), (900, 500)),
+            two(20, (680, 501), (880, 502)), // decided: together, sideways
+            two(60, (600, 505), (800, 505)), // 100: held back, no scroll
+            lift(100),                       // a flick: swipe
+            two(200, (400, 500), (600, 500)),
+            two(220, (420, 499), (620, 498)),
+            two(250, (520, 500), (720, 500)), // the other way
+            lift(300),
+        ]);
+        let mut expected = tapped(TwoFingerSwipeLeft);
+        expected.extend(tapped(TwoFingerSwipeRight));
+        assert_eq!(keys(&outs), expected);
+        assert!(axes(&outs).is_empty());
+    }
+
+    #[test]
+    fn swipes_are_named_by_the_cursor_direction() {
+        let config = TouchGestureConfig {
+            invert_x: true,
+            ..TouchGestureConfig::default()
+        };
+        let (outs, _) = run_with(
+            config,
+            bound,
+            &[
+                two(0, (700, 500), (900, 500)),
+                two(20, (680, 501), (880, 502)),
+                two(60, (600, 505), (800, 505)),
+                lift(100),
+            ],
+        );
+        assert_eq!(keys(&outs), tapped(TwoFingerSwipeRight));
+    }
+
+    #[test]
+    fn a_slow_sideways_move_scrolls_with_the_held_back_motion() {
+        let (outs, _) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(20, (380, 500), (580, 500)),
+            two(300, (300, 500), (500, 500)), // past 250 ms: a scroll
+            two(320, (290, 500), (490, 500)),
+            lift(400),
+        ]);
+        assert!(keys(&outs).is_empty());
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::H, -100), (Axis::V, 0)], [(Axis::H, -10), (Axis::V, 0)]]
+        );
+    }
+
+    #[test]
+    fn a_short_flick_does_nothing() {
+        let (outs, _) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(20, (380, 500), (580, 500)), // 20 of the 100 a swipe needs
+            lift(60),
+        ]);
+        assert!(keys(&outs).is_empty() && axes(&outs).is_empty());
+    }
+
+    #[test]
+    fn fingers_resting_before_lifting_dont_swipe() {
+        // No frames come while the fingers rest; lifting a second later is no flick.
+        let (outs, _) = run(&[
+            two(0, (700, 500), (900, 500)),
+            two(20, (680, 500), (880, 500)),
+            two(60, (580, 500), (780, 500)),
+            lift(1000),
+        ]);
+        assert!(keys(&outs).is_empty());
+    }
+
+    #[test]
+    fn a_flick_that_turns_vertical_scrolls() {
+        let (outs, recognizer) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(20, (380, 500), (580, 500)), // sideways: maybe a flick
+            two(40, (380, 560), (580, 560)), // now mostly down: scroll
+            two(60, (380, 570), (580, 570)),
+        ]);
+        assert!(keys(&outs).is_empty());
+        // Mostly down, so it keeps to vertical, the held-back motion included.
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::H, 0), (Axis::V, 60)], [(Axis::H, 0), (Axis::V, 10)]]
+        );
+        assert!(matches!(recognizer.two_finger, TwoFinger::Scrolling { .. }));
+    }
+
+    #[test]
     fn a_vertical_scroll_ignores_sideways_motion_until_the_fingers_lift() {
         let (outs, _) = run(&[
             two(0, (400, 500), (600, 500)),
@@ -2273,6 +2553,15 @@ mod tests {
             two(30, (500, 545), (700, 545)), // only sideways: nothing
         ]);
         assert_eq!(axes(&outs), vec![[(Axis::H, 0), (Axis::V, 5)]]);
+    }
+
+    #[test]
+    fn a_diagonal_two_finger_move_is_not_a_swipe() {
+        let (_, recognizer) = run(&[
+            two(0, (400, 500), (600, 500)),
+            two(10, (370, 530), (570, 530)), // 45 degrees: outside the 30 of a swipe
+        ]);
+        assert!(matches!(recognizer.two_finger, TwoFinger::Scrolling { .. }));
     }
 
     const A: Point = (300, 500);
@@ -2317,6 +2606,30 @@ mod tests {
     }
 
     #[test]
+    fn three_fingers_swipe_once_per_touch() {
+        let right = |x: i32| [(A.0 + x, A.1), (B.0 + x, B.1), (C.0 + x, C.1)];
+        let down = |y: i32| [(A.0, A.1 + y), (B.0, B.1 + y), (C.0, C.1 + y)];
+        let [a, b, c] = right(100);
+        let [a2, b2, c2] = right(160);
+        let [a3, b3, c3] = right(400);
+        let [d, e, g] = down(160);
+        let (outs, _) = run(&[
+            three(0, A, B, C),
+            three(20, a, b, c),    // 100 of the 150 a swipe needs
+            three(40, a2, b2, c2), // swipe right
+            three(60, a3, b3, c3), // further: nothing more
+            lift(80),
+            three(200, A, B, C),
+            three(220, d, e, g), // swipe down
+            lift(240),
+        ]);
+        let mut expected = tapped(ThreeFingerSwipeRight);
+        expected.extend(tapped(ThreeFingerSwipeDown));
+        assert_eq!(keys(&outs), expected);
+        assert!(axes(&outs).is_empty());
+    }
+
+    #[test]
     fn a_three_finger_touch_never_scrolls_or_moves_the_cursor() {
         let (outs, _) = run(&[
             three(0, A, B, C),
@@ -2350,5 +2663,8 @@ mod tests {
         let px = Px::new(&TouchGestureConfig::default(), (2000, 1000));
         assert_eq!(px.decide, 80);
         assert_eq!(px.zoom_step, 120);
+        // Swipes follow each axis's own size.
+        assert_eq!(px.swipe, [200, 100]);
+        assert_eq!(px.three_finger_swipe, [300, 150]);
     }
 }

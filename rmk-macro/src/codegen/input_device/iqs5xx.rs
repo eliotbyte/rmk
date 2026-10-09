@@ -161,7 +161,12 @@ pub(crate) fn expand_iqs5xx_device(
             && let Some(layers) = touch_layers.get(touchpad_id)
         {
             let touch_ident = format_ident!("{}_touch", sensor_name);
-            let config = expand_touch_gesture_config(gestures, sensor_id, touchpad_id);
+            let config = expand_touch_gesture_config(
+                gestures,
+                sensor_id,
+                touchpad_id,
+                (proc_invert_x, proc_invert_y, proc_swap_xy),
+            );
             let layers_ident = format_ident!("{}_TOUCH_LAYERS", sensor_name.to_uppercase());
             touchpad_id += 1;
             touch_initializers.push(Initializer {
@@ -198,11 +203,13 @@ fn expand_device_scroll(gestures: Option<&TouchGesturesConfig>) -> TokenStream {
     }
 }
 
-/// A `TouchGestureConfig` from `[input_device.iqs5xx.gestures]`.
+/// A `TouchGestureConfig` from `[input_device.iqs5xx.gestures]`, with the
+/// PointingProcessor's `(invert_x, invert_y, swap_xy)` so swipes go the cursor's way.
 fn expand_touch_gesture_config(
     gestures: &TouchGesturesConfig,
     device_id: u8,
     touchpad_id: usize,
+    (invert_x, invert_y, swap_xy): (bool, bool, bool),
 ) -> TokenStream {
     let touchpad_id = u8::try_from(touchpad_id).expect("at most 256 touchpads");
     let tap_move_percent = gestures.tap_move_percent.unwrap_or(3);
@@ -214,6 +221,9 @@ fn expand_touch_gesture_config(
         ::rmk::input_device::touch::TouchGestureConfig {
             device_id: #device_id,
             touchpad_id: #touchpad_id,
+            invert_x: #invert_x,
+            invert_y: #invert_y,
+            swap_xy: #swap_xy,
             tap_move_percent: #tap_move_percent,
             tap_min_ms: #tap_min_ms,
             tap_drag_ms: #tap_drag_ms,

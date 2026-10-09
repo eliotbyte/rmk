@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use super::KeyAction;
 
 /// A gesture a touchpad recognizes. Each has its own action per layer in the touch
-/// map.
+/// map. Directions are the cursor's: a swipe left moves the fingers the way that
+/// moves the cursor left.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MaxSize)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -21,11 +22,19 @@ pub enum TouchGesture {
     ZoomIn,
     /// Two fingers moving together, once per zoom step.
     ZoomOut,
+    TwoFingerSwipeLeft,
+    TwoFingerSwipeRight,
+    TwoFingerSwipeUp,
+    TwoFingerSwipeDown,
+    ThreeFingerSwipeLeft,
+    ThreeFingerSwipeRight,
+    ThreeFingerSwipeUp,
+    ThreeFingerSwipeDown,
 }
 
 impl TouchGesture {
     /// How many gestures there are.
-    pub const COUNT: usize = 5;
+    pub const COUNT: usize = 13;
 
     /// Every gesture, in the order of [`TouchAction::actions`].
     pub const ALL: [Self; Self::COUNT] = [
@@ -34,6 +43,14 @@ impl TouchGesture {
         Self::ThreeFingerTap,
         Self::ZoomIn,
         Self::ZoomOut,
+        Self::TwoFingerSwipeLeft,
+        Self::TwoFingerSwipeRight,
+        Self::TwoFingerSwipeUp,
+        Self::TwoFingerSwipeDown,
+        Self::ThreeFingerSwipeLeft,
+        Self::ThreeFingerSwipeRight,
+        Self::ThreeFingerSwipeUp,
+        Self::ThreeFingerSwipeDown,
     ];
 }
 
@@ -90,6 +107,6 @@ mod tests {
         for (i, gesture) in TouchGesture::ALL.iter().enumerate() {
             assert_eq!(*gesture as usize, i);
         }
-        assert_eq!(TouchGesture::ZoomOut as usize + 1, TouchGesture::COUNT);
+        assert_eq!(TouchGesture::ThreeFingerSwipeDown as usize + 1, TouchGesture::COUNT);
     }
 }

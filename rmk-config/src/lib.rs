@@ -1425,17 +1425,36 @@ pub struct TouchActionsConfig {
     pub zoom_in: Option<String>,
     /// Two fingers moving together, once per zoom step.
     pub zoom_out: Option<String>,
+    /// Two fingers flicked one way: once per touch, in place of scrolling that way.
+    /// Directions are the cursor's.
+    pub two_finger_swipe_left: Option<String>,
+    pub two_finger_swipe_right: Option<String>,
+    pub two_finger_swipe_up: Option<String>,
+    pub two_finger_swipe_down: Option<String>,
+    /// Three fingers moving far one way: once per touch.
+    pub three_finger_swipe_left: Option<String>,
+    pub three_finger_swipe_right: Option<String>,
+    pub three_finger_swipe_up: Option<String>,
+    pub three_finger_swipe_down: Option<String>,
 }
 
 impl TouchActionsConfig {
     /// Each gesture's action by its `rmk_types::action::TouchGesture` variant name.
-    pub fn actions(&self) -> [(&'static str, &Option<String>); 5] {
+    pub fn actions(&self) -> [(&'static str, &Option<String>); 13] {
         [
             ("Tap", &self.tap),
             ("TwoFingerTap", &self.two_finger_tap),
             ("ThreeFingerTap", &self.three_finger_tap),
             ("ZoomIn", &self.zoom_in),
             ("ZoomOut", &self.zoom_out),
+            ("TwoFingerSwipeLeft", &self.two_finger_swipe_left),
+            ("TwoFingerSwipeRight", &self.two_finger_swipe_right),
+            ("TwoFingerSwipeUp", &self.two_finger_swipe_up),
+            ("TwoFingerSwipeDown", &self.two_finger_swipe_down),
+            ("ThreeFingerSwipeLeft", &self.three_finger_swipe_left),
+            ("ThreeFingerSwipeRight", &self.three_finger_swipe_right),
+            ("ThreeFingerSwipeUp", &self.three_finger_swipe_up),
+            ("ThreeFingerSwipeDown", &self.three_finger_swipe_down),
         ]
     }
 
@@ -1448,6 +1467,14 @@ impl TouchActionsConfig {
             three_finger_tap: map(&self.three_finger_tap)?,
             zoom_in: map(&self.zoom_in)?,
             zoom_out: map(&self.zoom_out)?,
+            two_finger_swipe_left: map(&self.two_finger_swipe_left)?,
+            two_finger_swipe_right: map(&self.two_finger_swipe_right)?,
+            two_finger_swipe_up: map(&self.two_finger_swipe_up)?,
+            two_finger_swipe_down: map(&self.two_finger_swipe_down)?,
+            three_finger_swipe_left: map(&self.three_finger_swipe_left)?,
+            three_finger_swipe_right: map(&self.three_finger_swipe_right)?,
+            three_finger_swipe_up: map(&self.three_finger_swipe_up)?,
+            three_finger_swipe_down: map(&self.three_finger_swipe_down)?,
         })
     }
 }
