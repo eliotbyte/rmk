@@ -128,6 +128,7 @@ pub(crate) fn expand_iqs5xx_device(
                 swap_xy: #proc_swap_xy,
                 acceleration: #acceleration,
                 scroll_acceleration: #scroll_acceleration,
+                device_scroll: ::rmk::input_device::pointing::ScrollConfig::default(),
             };
             let mut #processor_ident = ::rmk::input_device::pointing::PointingProcessor::new(
                 &keymap,

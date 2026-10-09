@@ -273,6 +273,7 @@ pub(crate) fn expand_pmw33xx_device(
                 swap_xy: #proc_swap_xy,
                 acceleration: #acceleration,
                 scroll_acceleration: #scroll_acceleration,
+                device_scroll: ::rmk::input_device::pointing::ScrollConfig::default(),
                 ..Default::default()
             };
 
