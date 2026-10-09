@@ -13,10 +13,12 @@
 //! is not recognized at all. The processor follows the active layer through
 //! [`LayerChangeEvent`]s, and gets its touchpad's actions per layer when built.
 //!
-//! A one-finger tap waits out a short window before it clicks, in case another
-//! touch follows: tap, then touch and move holds the tap's action while the finger
-//! touches, so it drags; two quick taps double-click; and tap, tap, touch and move
-//! double-clicks and drags.
+//! A tap waits out a short window before it clicks, in case another touch follows:
+//! tap, then touch and move holds the tap's action while the finger touches, so it
+//! drags; two quick taps double-click; and tap, tap, touch and move double-clicks
+//! and drags. Two- and three-finger taps drag the same way when the touch after them
+//! has as many fingers; such a drag only moves the cursor, and goes on while any of
+//! its fingers touches.
 //!
 //! Optionally a drag outlives a lifted finger briefly, so the finger can be put back
 //! down to go on (drag lock).
@@ -54,9 +56,10 @@ pub struct TouchGestureConfig {
     pub tap_move_percent: u8,
     /// A tap lasts at least this many milliseconds; a shorter touch is a graze.
     pub tap_min_ms: u16,
-    /// A one-finger touch starting within this many milliseconds of a tap lifting
-    /// turns the tap into a drag, holding its action until the touch lifts. A tap
-    /// clicks only once this has passed. 0 turns tap drags off, so taps click at once.
+    /// A touch with as many fingers as a tap, starting within this many milliseconds
+    /// of the tap lifting, turns the tap into a drag, holding its action until the
+    /// touch lifts. A tap clicks only once this has passed. 0 turns tap drags off, so
+    /// taps click at once.
     pub tap_drag_ms: u16,
     /// A drag waits this many milliseconds after its fingers lift before it ends, so
     /// a finger put back down goes on with it; a quick still tap then ends it at once.
@@ -222,16 +225,17 @@ impl Drag {
 /// The most one-finger taps waiting to click; more in a row click as many.
 const MAX_PENDING_TAPS: u8 = 3;
 
-/// One-finger taps waiting out the tap-drag window before they click.
+/// Taps of one kind waiting out the tap-drag window before they click.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingTaps {
+    /// `Tap`, `TwoFingerTap` or `ThreeFingerTap`.
+    gesture: TouchGesture,
     count: u8,
     /// When the last of them lifted.
     lifted_ms: u64,
     /// Where the last of them touched.
-    at: Point,
-    /// The one-finger touch that started within the window, until it is another tap
-    /// or a drag.
+    at: [Option<Point>; TOUCH_MAX_FINGERS],
+    /// The touch that started within the window, until it is another tap or a drag.
     touch: Option<NextTouch>,
 }
 
@@ -241,6 +245,21 @@ struct NextTouch {
     started_ms: u64,
     /// Its cursor motion, held back meanwhile.
     held: Point,
+    /// The most fingers down at once so far.
+    fingers: u8,
+}
+
+/// How long the fingers of a touch after a multi-finger tap have to land, before a
+/// touch with fewer fingers is something else.
+const LAND_MS: u64 = 100;
+
+/// How many fingers tap for `gesture`.
+fn tap_fingers(gesture: TouchGesture) -> u8 {
+    match gesture {
+        TouchGesture::TwoFingerTap => 2,
+        TouchGesture::ThreeFingerTap => 3,
+        _ => 1,
+    }
 }
 
 impl Drag {
@@ -398,7 +417,7 @@ impl Recognizer {
     /// Click the taps waiting out the tap-drag window.
     fn flush_taps(&mut self, out: &mut Output) {
         if let Some(taps) = self.pending_taps.take() {
-            out.taps(TouchGesture::Tap, taps.count);
+            out.taps(taps.gesture, taps.count);
         }
     }
 
@@ -406,9 +425,9 @@ impl Recognizer {
     /// one's action stays down while the fingers touch.
     fn start_tap_drag(&mut self, lead: Option<(usize, Point)>, out: &mut Output) {
         if let Some(taps) = self.pending_taps.take() {
-            out.taps(TouchGesture::Tap, taps.count - 1);
-            let _ = out.keys.push((TouchGesture::Tap, true));
-            self.drag = Some(Drag::new(TouchGesture::Tap, lead));
+            out.taps(taps.gesture, taps.count - 1);
+            let _ = out.keys.push((taps.gesture, true));
+            self.drag = Some(Drag::new(taps.gesture, lead));
         }
     }
 
@@ -421,37 +440,56 @@ impl Recognizer {
         out: &mut Output,
     ) -> Option<()> {
         let taps = self.pending_taps?;
+        let fingers = tap_fingers(taps.gesture);
         match taps.touch {
             Some(touch) => match frame.count {
-                // Lifted before it moved or rested: another tap, unless it only grazed.
+                // Lifted before it moved or rested: another tap, unless it only grazed
+                // or had fewer fingers.
                 0 => {
                     let elapsed = frame.at_ms.saturating_sub(touch.started_ms);
-                    self.pending_taps = Some(if elapsed >= u64::from(self.config.tap_min_ms) {
-                        PendingTaps {
+                    if touch.fingers < fingers {
+                        self.flush_taps(out);
+                    } else if elapsed >= u64::from(self.config.tap_min_ms) {
+                        self.pending_taps = Some(PendingTaps {
                             count: (taps.count + 1).min(MAX_PENDING_TAPS),
                             lifted_ms: frame.at_ms,
                             touch: None,
                             ..taps
-                        }
+                        });
                     } else {
-                        PendingTaps { touch: None, ..taps }
-                    });
+                        self.pending_taps = Some(PendingTaps { touch: None, ..taps });
+                    }
                     self.reset();
                 }
-                1 => {
+                // Fewer fingers than the taps had, for longer than they take to land:
+                // no drag after all.
+                count
+                    if count < fingers
+                        && touch.fingers < fingers
+                        && frame.at_ms.saturating_sub(touch.started_ms) > LAND_MS =>
+                {
+                    self.flush_taps(out);
+                    return None;
+                }
+                count if count <= fingers => {
                     let lead = Drag::any_finger(frame);
                     let step = match lead {
                         Some((i, now)) => previous[i].map_or((0, 0), |last| sub(now, last)),
                         None => (0, 0),
                     };
                     let held = (touch.held.0 + step.0, touch.held.1 + step.1);
+                    let fingers_down = touch.fingers.max(count);
                     // Moving further than a tap may is a drag, as in libinput.
-                    if len(held) > self.px.tap_move {
+                    if fingers_down == fingers && len(held) > self.px.tap_move {
                         self.start_tap_drag(lead, out);
                         out.cursor(held);
                     } else {
                         self.pending_taps = Some(PendingTaps {
-                            touch: Some(NextTouch { held, ..touch }),
+                            touch: Some(NextTouch {
+                                held,
+                                fingers: fingers_down,
+                                ..touch
+                            }),
                             ..taps
                         });
                     }
@@ -464,16 +502,19 @@ impl Recognizer {
             },
             None => {
                 let in_window = frame.at_ms.saturating_sub(taps.lifted_ms) <= u64::from(self.config.tap_drag_ms);
-                let near = Drag::any_finger(frame).filter(|&(_, p)| len(sub(p, taps.at)) <= self.px.tap_drag_distance);
-                if frame.count == 1
-                    && in_window
-                    && let Some((_, landed)) = near
-                {
+                let near = frame.slots.iter().flatten().any(|&p| {
+                    taps.at
+                        .iter()
+                        .flatten()
+                        .any(|&tapped| len(sub(p, tapped)) <= self.px.tap_drag_distance)
+                });
+                if (1..=fingers).contains(&frame.count) && in_window && near {
                     self.pending_taps = Some(PendingTaps {
-                        at: landed,
+                        at: frame.slots,
                         touch: Some(NextTouch {
                             started_ms: frame.at_ms,
                             held: (0, 0),
+                            fingers: frame.count,
                         }),
                         ..taps
                     });
@@ -499,11 +540,16 @@ impl Recognizer {
         }
         if let Some(taps) = self.pending_taps {
             match taps.touch {
-                // The touch after the taps rested: a drag, with whatever it moved.
+                // The touch after the taps rested: a drag, with whatever it moved, if
+                // it has as many fingers as they had.
                 Some(touch) if now_ms >= touch.started_ms + TAP_MS => {
-                    let lead = self.previous.iter().enumerate().find_map(|(i, p)| p.map(|p| (i, p)));
-                    self.start_tap_drag(lead, &mut out);
-                    out.cursor(touch.held);
+                    if touch.fingers < tap_fingers(taps.gesture) {
+                        self.flush_taps(&mut out);
+                    } else {
+                        let lead = self.previous.iter().enumerate().find_map(|(i, p)| p.map(|p| (i, p)));
+                        self.start_tap_drag(lead, &mut out);
+                        out.cursor(touch.held);
+                    }
                 }
                 None if now_ms >= taps.lifted_ms + u64::from(self.config.tap_drag_ms) => self.flush_taps(&mut out),
                 _ => {}
@@ -524,9 +570,12 @@ impl Recognizer {
         // A drag keeps its key down until no finger is left, and nothing else happens
         // meanwhile.
         if let Some(mut drag) = self.drag {
+            // A drag after a multi-finger tap takes as many fingers, so they only move
+            // the cursor, and lifting some of them doesn't end it.
+            let multi_finger = tap_fingers(drag.gesture) > 1;
             // Two fingers scroll while the drag holds its button, and one of them moving
             // alone moves the cursor, so another finger can take over.
-            let two_fingers = frame.count >= 2 && drag.lifted_ms.is_none();
+            let two_fingers = frame.count >= 2 && drag.lifted_ms.is_none() && !multi_finger;
             if !two_fingers && self.two_finger != TwoFinger::Idle {
                 self.two_finger = TwoFinger::Idle;
                 drag.lead = Drag::any_finger(frame);
@@ -553,10 +602,11 @@ impl Recognizer {
                 // Fingers back within drag lock: the drag goes on from where they are.
                 (count, Some(_)) => {
                     drag.lifted_ms = None;
-                    // Two fingers aren't a tap that ends the drag.
-                    drag.relock = Some((frame.at_ms, if count >= 2 { u32::MAX } else { 0 }));
+                    // Two fingers aren't a tap that ends a one-finger drag.
+                    let scrolls = count >= 2 && !multi_finger;
+                    drag.relock = Some((frame.at_ms, if scrolls { u32::MAX } else { 0 }));
                     drag.lead = Drag::any_finger(frame);
-                    if count >= 2 {
+                    if scrolls {
                         self.drag = Some(drag);
                         self.two_fingers(frame, &mut out);
                         return out;
@@ -677,12 +727,13 @@ impl Recognizer {
             _ => return,
         };
         if elapsed <= limit && bound(gesture) {
-            if gesture == TouchGesture::Tap && self.config.tap_drag_ms > 0 {
+            if self.config.tap_drag_ms > 0 {
                 // Clicks once the tap-drag window passes, unless a touch makes it a drag.
                 self.pending_taps = Some(PendingTaps {
+                    gesture,
                     count: 1,
                     lifted_ms: at_ms,
-                    at: touch.landed.iter().flatten().next().copied().unwrap_or_default(),
+                    at: touch.landed,
                     touch: None,
                 });
             } else {
@@ -1111,9 +1162,108 @@ mod tests {
 
     #[test]
     fn two_fingers_tapping_tap_once_both_lift() {
-        let (outs, _) = run(&[one(0, (300, 500)), two(10, (300, 500), (500, 500)), lift(150)]);
+        let (outs, _) = run(&[
+            one(0, (300, 500)),
+            two(10, (300, 500), (500, 500)),
+            lift(150),
+            Step::Timeout(330),
+        ]);
         assert_eq!(keys(&outs), tapped(TwoFingerTap));
+        assert_eq!(keys(&outs[3..4]), tapped(TwoFingerTap));
         assert!(axes(&outs).is_empty());
+    }
+
+    #[test]
+    fn two_quick_two_finger_taps_click_twice() {
+        let (a, b) = ((300, 500), (500, 500));
+        let (outs, _) = run(&[two(0, a, b), lift(100), two(200, a, b), lift(260), Step::Timeout(440)]);
+        assert_eq!(keys(&outs), [tapped(TwoFingerTap), tapped(TwoFingerTap)].concat());
+    }
+
+    #[test]
+    fn two_finger_tap_then_two_fingers_moving_drag_with_its_button_and_only_move_the_cursor() {
+        let (outs, recognizer) = run(&[
+            two(0, (300, 500), (500, 500)),
+            lift(100), // a two-finger tap: waits
+            one(200, (300, 500)),
+            two(210, (300, 500), (500, 500)),
+            two(220, (335, 500), (535, 500)), // moves: a drag
+            two(230, (345, 510), (545, 510)), // together: no scroll
+            one(240, (345, 510)),             // one finger lifts: still held
+            one(250, (365, 510)),
+            lift(300),
+        ]);
+        assert_eq!(keys(&outs), tapped(TwoFingerTap));
+        assert_eq!(keys(&outs[4..5]), vec![(TwoFingerTap, true)]);
+        assert_eq!(keys(&outs[8..9]), vec![(TwoFingerTap, false)]);
+        assert_eq!(
+            axes(&outs),
+            vec![
+                [(Axis::X, 35), (Axis::Y, 0)],
+                [(Axis::X, 10), (Axis::Y, 10)],
+                [(Axis::X, 20), (Axis::Y, 0)],
+            ]
+        );
+        assert!(recognizer.drag.is_none() && recognizer.pending_taps.is_none());
+    }
+
+    #[test]
+    fn two_finger_tap_then_two_fingers_resting_drag_and_drag_lock_lets_the_hand_move() {
+        let (a, b) = ((300, 500), (500, 500));
+        let (outs, _) = run_with(
+            locked(300),
+            bound,
+            &[
+                two(0, a, b),
+                lift(100),
+                two(200, a, b),
+                Step::Timeout(380), // rested: a drag
+                two(390, (320, 500), (520, 500)),
+                lift(400), // lifted: still held
+                Step::Timeout(600),
+                two(650, (100, 100), (300, 100)), // back down, elsewhere: no jump
+                two(660, (110, 100), (310, 100)),
+                lift(900),
+                Step::Timeout(1200), // nobody came back: released
+            ],
+        );
+        assert_eq!(keys(&outs), tapped(TwoFingerTap));
+        assert_eq!(keys(&outs[3..4]), vec![(TwoFingerTap, true)]);
+        assert_eq!(keys(&outs[10..11]), vec![(TwoFingerTap, false)]);
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::X, 20), (Axis::Y, 0)], [(Axis::X, 10), (Axis::Y, 0)]]
+        );
+    }
+
+    #[test]
+    fn two_finger_tap_then_one_finger_moving_clicks_and_moves_the_cursor() {
+        let (outs, recognizer) = run(&[
+            two(0, (300, 500), (500, 500)),
+            lift(100),
+            one(200, (300, 500)),
+            one(250, (310, 500)),
+            one(320, (330, 500)), // no second finger by now: no drag
+        ]);
+        assert_eq!(keys(&outs), tapped(TwoFingerTap));
+        assert_eq!(keys(&outs[4..5]), tapped(TwoFingerTap));
+        assert_eq!(axes(&outs), vec![[(Axis::X, 20), (Axis::Y, 0)]]);
+        assert!(recognizer.drag.is_none() && recognizer.pending_taps.is_none());
+    }
+
+    #[test]
+    fn three_finger_tap_then_three_fingers_moving_drag_with_its_button() {
+        let (a, b, c) = ((300, 500), (450, 480), (600, 500));
+        let (outs, _) = run(&[
+            three(0, a, b, c),
+            lift(100),
+            three(200, a, b, c),
+            three(210, (335, 500), (485, 480), (635, 500)),
+            lift(300),
+        ]);
+        assert_eq!(keys(&outs), tapped(ThreeFingerTap));
+        assert_eq!(keys(&outs[3..4]), vec![(ThreeFingerTap, true)]);
+        assert_eq!(axes(&outs), vec![[(Axis::X, 35), (Axis::Y, 0)]]);
     }
 
     #[test]
@@ -1776,6 +1926,7 @@ mod tests {
             three(60, (302, 501), (451, 480), (600, 502)), // a little jitter
             two(120, A, B),
             lift(150),
+            Step::Timeout(330),
         ]);
         assert_eq!(keys(&outs), tapped(ThreeFingerTap));
         assert!(axes(&outs).is_empty());

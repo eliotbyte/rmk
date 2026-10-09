@@ -76,7 +76,7 @@ name = "trackpad0"
 # natural_scroll = false    # content follows the fingers, as on a phone
 # tap_move_percent = 3      # a tap moves at most this far (in % of the trackpad); more is a cursor move
 # tap_min_ms = 0            # a tap lasts at least this long; shorter is a graze, e.g. 20
-# tap_drag_ms = 180         # a touch starting this soon after a tap drags; a tap clicks
+# tap_drag_ms = 180         # a touch starting this soon after a tap, with as many fingers, drags; a tap clicks
 #                           # once this has passed. 0 turns tap drags off, so taps click at once
 # drag_lock_ms = 0          # a drag lasts this long after the fingers lift, so a finger put
 #                           # back down goes on with it; a quick tap ends it. 300 is a good start
@@ -96,6 +96,7 @@ touch = [{ tap = "MouseBtn1", two_finger_tap = "MouseBtn2", three_finger_tap = "
 |---|---|
 | `tap`, `two_finger_tap`, `three_finger_tap` | The fingers touch and lift without moving, within 180 ms for one finger and 300 ms for more |
 | `tap`, held | One finger touches within `tap_drag_ms` of a tap lifting, close to it, and moves or rests: the tap becomes a drag, its action pressed until the finger lifts. Tap, then touch and move drags; two quick taps double-click; tap, tap, touch and move double-clicks and drags. A tap waits out `tap_drag_ms` before it clicks. During the drag another finger can take over when the first runs out of room. |
+| `two_finger_tap`, `three_finger_tap`, held | The same with two or three fingers: tap, then touch with as many fingers and move drags with the right or middle button. The drag only moves the cursor, no scrolling, and goes on while any of its fingers touches. |
 
 A gesture with no action on the active layer isn't recognized there at all.
 

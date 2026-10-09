@@ -1463,10 +1463,10 @@ pub struct TouchGesturesConfig {
     /// A tap lasts at least this many milliseconds; a shorter touch is a graze. Off
     /// (0) by default.
     pub tap_min_ms: Option<u16>,
-    /// A one-finger touch starting within this many milliseconds of a tap turns the
-    /// tap into a drag, holding its action until the touch lifts: tap, then touch and
-    /// move drags. A tap clicks only once this has passed; 0 turns tap drags off, so
-    /// taps click at once. Defaults to 180, as in libinput.
+    /// A touch with as many fingers as a tap, starting within this many milliseconds
+    /// of it, turns the tap into a drag, holding its action until the touch lifts:
+    /// tap, then touch and move drags. A tap clicks only once this has passed; 0 turns
+    /// tap drags off, so taps click at once. Defaults to 180, as in libinput.
     pub tap_drag_ms: Option<u16>,
     /// A drag waits this many milliseconds after its fingers lift before it ends, so a
     /// finger put back down goes on with it; a quick still tap ends it at once. Off
