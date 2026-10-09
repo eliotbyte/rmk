@@ -13,6 +13,7 @@ pub mod pmw33xx;
 pub mod pmw3610;
 pub mod pointing;
 pub mod rotary_encoder;
+pub mod touch;
 
 /// The trait for input devices.
 ///
