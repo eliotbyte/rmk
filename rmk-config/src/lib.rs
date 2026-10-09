@@ -1468,6 +1468,10 @@ pub struct TouchGesturesConfig {
     /// move drags. A tap clicks only once this has passed; 0 turns tap drags off, so
     /// taps click at once. Defaults to 180, as in libinput.
     pub tap_drag_ms: Option<u16>,
+    /// A drag waits this many milliseconds after its fingers lift before it ends, so a
+    /// finger put back down goes on with it; a quick still tap ends it at once. Off
+    /// (0) by default.
+    pub drag_lock_ms: Option<u16>,
 }
 
 /// I²C bus configuration for the IQS5xx. Distinct from the generic `I2cConfig`

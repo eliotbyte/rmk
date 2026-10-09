@@ -78,6 +78,8 @@ name = "trackpad0"
 # tap_min_ms = 0            # a tap lasts at least this long; shorter is a graze, e.g. 20
 # tap_drag_ms = 180         # a touch starting this soon after a tap drags; a tap clicks
 #                           # once this has passed. 0 turns tap drags off, so taps click at once
+# drag_lock_ms = 0          # a drag lasts this long after the fingers lift, so a finger put
+#                           # back down goes on with it; a quick tap ends it. 300 is a good start
 ```
 
 What each gesture does is set per layer in `[[keymap.layer]]`, like encoders,

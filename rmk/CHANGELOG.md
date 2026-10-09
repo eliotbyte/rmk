@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Touchpad gestures from `keyboard.toml`: `[input_device.iqs5xx.gestures]` turns them on for a touchpad, on whichever half it is, and each layer binds them in `touch`.
 - Touchpad tap drags: tap, then touch and move drags with the tap's action, and two quick taps double-click. `tap_drag_ms` sets how soon the touch has to follow.
 - Steadier touchpad tracking: no cursor jump while a finger lands or lifts beside another, a scroll can start with one finger, and it pauses while one of its fingers lifts.
+- Touchpad drag lock: with `drag_lock_ms`, a drag outlives its fingers lifting for that long, so they can be put back down to go on.
 - Add timer-only processors and combine polling with resettable deadlines through `#[processor]`. Both TOML and Rust projects implement `DeadlineProcessor::deadline()` and `on_deadline()` directly.
 - Macro operations accept any single action (`WM`, `MO`, `OSM`, ...) without the `vial` feature, and a new `pause_for_release` operation (`MacroOp::PauseForRelease`) runs the rest of the macro when the macro key is released
 - PMW3610 `force_awake` now follows the keyboard's sleep state, ZMK style: the sensor is held in RUN while the keyboard is awake and released to its REST modes when the idle sleep starts. `PointingDriver` gained a default-implemented `set_low_power` hint and `PointingDevice` subscribes to `SleepStateEvent`; each sensor in `keyboard.toml` reserves its subscriber slot automatically.

@@ -17,6 +17,9 @@
 //! touch follows: tap, then touch and move holds the tap's action while the finger
 //! touches, so it drags; two quick taps double-click; and tap, tap, touch and move
 //! double-clicks and drags.
+//!
+//! Optionally a drag outlives a lifted finger briefly, so the finger can be put back
+//! down to go on (drag lock).
 
 use embassy_futures::select::{Either, select};
 use embassy_time::{Instant, Timer};
@@ -55,6 +58,10 @@ pub struct TouchGestureConfig {
     /// turns the tap into a drag, holding its action until the touch lifts. A tap
     /// clicks only once this has passed. 0 turns tap drags off, so taps click at once.
     pub tap_drag_ms: u16,
+    /// A drag waits this many milliseconds after its fingers lift before it ends, so
+    /// a finger put back down goes on with it; a quick still tap then ends it at once.
+    /// 0 turns this off.
+    pub drag_lock_ms: u16,
 }
 
 impl Default for TouchGestureConfig {
@@ -65,6 +72,7 @@ impl Default for TouchGestureConfig {
             tap_move_percent: 3,
             tap_min_ms: 0,
             tap_drag_ms: 180,
+            drag_lock_ms: 0,
         }
     }
 }
@@ -193,11 +201,21 @@ struct Drag {
     gesture: TouchGesture,
     /// The slot moving the cursor, and where it was last frame.
     lead: Option<(usize, Point)>,
+    /// When the fingers lifted, while drag lock keeps the drag going.
+    lifted_ms: Option<u64>,
+    /// The touch since drag lock caught the drag: when it started and how far it
+    /// moved, as a quick still one ends the drag.
+    relock: Option<(u64, u32)>,
 }
 
 impl Drag {
     fn new(gesture: TouchGesture, lead: Option<(usize, Point)>) -> Self {
-        Self { gesture, lead }
+        Self {
+            gesture,
+            lead,
+            lifted_ms: None,
+            relock: None,
+        }
     }
 }
 
@@ -363,12 +381,18 @@ impl Recognizer {
     }
 
     /// When something happens without a frame: a touch after a tap resting long
-    /// enough to drag, or taps clicking once the tap-drag window has passed.
+    /// enough to drag, taps clicking once the tap-drag window has passed, or drag lock
+    /// running out.
     fn deadline(&self) -> Option<u64> {
-        self.pending_taps.map(|taps| match taps.touch {
+        let taps = self.pending_taps.map(|taps| match taps.touch {
             Some(touch) => touch.started_ms + TAP_MS,
             None => taps.lifted_ms + u64::from(self.config.tap_drag_ms),
-        })
+        });
+        let drag_lock = self
+            .drag
+            .and_then(|drag| drag.lifted_ms)
+            .map(|lifted_ms| lifted_ms + u64::from(self.config.drag_lock_ms));
+        taps.into_iter().chain(drag_lock).min()
     }
 
     /// Click the taps waiting out the tap-drag window.
@@ -464,6 +488,15 @@ impl Recognizer {
 
     fn timeout(&mut self, now_ms: u64) -> Output {
         let mut out = Output::default();
+        // Drag lock ran out without a finger coming back: the drag ends.
+        if let Some(drag) = self.drag
+            && let Some(lifted_ms) = drag.lifted_ms
+            && now_ms >= lifted_ms + u64::from(self.config.drag_lock_ms)
+        {
+            let _ = out.keys.push((drag.gesture, false));
+            self.reset();
+            return out;
+        }
         if let Some(taps) = self.pending_taps {
             match taps.touch {
                 // The touch after the taps rested: a drag, with whatever it moved.
@@ -493,7 +526,7 @@ impl Recognizer {
         if let Some(mut drag) = self.drag {
             // Two fingers scroll while the drag holds its button, and one of them moving
             // alone moves the cursor, so another finger can take over.
-            let two_fingers = frame.count >= 2;
+            let two_fingers = frame.count >= 2 && drag.lifted_ms.is_none();
             if !two_fingers && self.two_finger != TwoFinger::Idle {
                 self.two_finger = TwoFinger::Idle;
                 drag.lead = Drag::any_finger(frame);
@@ -502,17 +535,49 @@ impl Recognizer {
                     return out;
                 }
             }
-            if frame.count == 0 {
-                let _ = out.keys.push((drag.gesture, false));
-                self.reset();
-                return out;
+            match (frame.count, drag.lifted_ms) {
+                (0, Some(_)) => {}
+                (0, None) => {
+                    // A quick still touch after drag lock caught the drag ends it.
+                    let ended = drag.relock.is_some_and(|(started_ms, travel)| {
+                        frame.at_ms.saturating_sub(started_ms) <= TAP_MS && travel <= self.px.tap_move
+                    });
+                    if self.config.drag_lock_ms > 0 && !ended {
+                        drag.lifted_ms = Some(frame.at_ms);
+                    } else {
+                        let _ = out.keys.push((drag.gesture, false));
+                        self.reset();
+                        return out;
+                    }
+                }
+                // Fingers back within drag lock: the drag goes on from where they are.
+                (count, Some(_)) => {
+                    drag.lifted_ms = None;
+                    // Two fingers aren't a tap that ends the drag.
+                    drag.relock = Some((frame.at_ms, if count >= 2 { u32::MAX } else { 0 }));
+                    drag.lead = Drag::any_finger(frame);
+                    if count >= 2 {
+                        self.drag = Some(drag);
+                        self.two_fingers(frame, &mut out);
+                        return out;
+                    }
+                }
+                _ if two_fingers => {
+                    if let Some((_, travel)) = &mut drag.relock {
+                        *travel = u32::MAX;
+                    }
+                    self.drag = Some(drag);
+                    self.two_fingers(frame, &mut out);
+                    return out;
+                }
+                _ => {
+                    let step = drag.follow(&previous, frame, self.px.decide * 4);
+                    if let Some((_, travel)) = &mut drag.relock {
+                        *travel = travel.saturating_add(len(step));
+                    }
+                    out.cursor(step);
+                }
             }
-            if two_fingers {
-                self.drag = Some(drag);
-                self.two_fingers(frame, &mut out);
-                return out;
-            }
-            out.cursor(drag.follow(&previous, frame, self.px.decide * 4));
             self.drag = Some(drag);
             return out;
         }
@@ -1241,8 +1306,62 @@ mod tests {
         assert_eq!(keys(&outs), tapped(Tap));
     }
 
+    fn locked(drag_lock_ms: u16) -> TouchGestureConfig {
+        TouchGestureConfig {
+            drag_lock_ms,
+            ..TouchGestureConfig::default()
+        }
+    }
+
     #[test]
-    fn lifting_the_finger_ends_a_tap_drag() {
+    fn drag_lock_keeps_a_drag_going_while_the_finger_is_put_back() {
+        let (outs, _) = run_with(
+            locked(300),
+            bound,
+            &[
+                one(0, (100, 100)),
+                lift(80),
+                one(150, (100, 100)),
+                one(160, (200, 100)), // dragging
+                lift(400),            // lifted: still held
+                Step::Timeout(500),
+                one(600, (100, 100)), // back down, elsewhere: no jump
+                one(610, (130, 100)),
+                lift(900),
+                Step::Timeout(1199),
+                Step::Timeout(1200), // nobody came back: released
+            ],
+        );
+        assert_eq!(keys(&outs), tapped(Tap));
+        assert_eq!(keys(&outs[10..11]), vec![(Tap, false)]);
+        assert_eq!(
+            axes(&outs),
+            vec![[(Axis::X, 100), (Axis::Y, 0)], [(Axis::X, 30), (Axis::Y, 0)]]
+        );
+    }
+
+    #[test]
+    fn a_quick_tap_ends_a_locked_drag_at_once() {
+        let (outs, recognizer) = run_with(
+            locked(300),
+            bound,
+            &[
+                one(0, (100, 100)),
+                lift(80),
+                one(150, (100, 100)),
+                one(160, (200, 100)),
+                lift(400),
+                one(500, (100, 100)),
+                lift(550), // a tap: drop
+            ],
+        );
+        assert_eq!(keys(&outs), tapped(Tap));
+        assert_eq!(keys(&outs[6..7]), vec![(Tap, false)]);
+        assert!(recognizer.drag.is_none());
+    }
+
+    #[test]
+    fn without_drag_lock_lifting_ends_the_drag() {
         let (outs, _) = run(&[
             one(0, (100, 100)),
             lift(80),
@@ -1337,6 +1456,37 @@ mod tests {
             vec![[(Axis::H, 0), (Axis::V, 10)], [(Axis::X, 10), (Axis::Y, 0)]]
         );
         assert!(recognizer.drag.is_some());
+    }
+
+    #[test]
+    fn a_locked_drag_scrolls_with_two_fingers_and_goes_on_with_one() {
+        let (outs, recognizer) = run_with(
+            locked(300),
+            bound,
+            &[
+                one(0, (100, 100)),
+                lift(80),
+                one(150, (100, 100)),
+                one(160, (200, 100)), // dragging
+                lift(400),            // held by drag lock
+                two(500, (400, 500), (600, 500)),
+                two(510, (400, 530), (600, 530)),
+                two(520, (400, 540), (600, 540)), // scrolling, button still down
+                lift(530),                        // held again
+                one(600, (300, 300)),             // a finger: the cursor again
+                one(610, (320, 300)),
+            ],
+        );
+        assert_eq!(keys(&outs), vec![(Tap, true)]);
+        assert_eq!(
+            axes(&outs),
+            vec![
+                [(Axis::X, 100), (Axis::Y, 0)],
+                [(Axis::H, 0), (Axis::V, 10)],
+                [(Axis::X, 20), (Axis::Y, 0)],
+            ]
+        );
+        assert!(recognizer.drag.is_some_and(|d| d.lifted_ms.is_none()));
     }
 
     #[test]

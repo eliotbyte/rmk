@@ -208,6 +208,7 @@ fn expand_touch_gesture_config(
     let tap_move_percent = gestures.tap_move_percent.unwrap_or(3);
     let tap_min_ms = gestures.tap_min_ms.unwrap_or(0);
     let tap_drag_ms = gestures.tap_drag_ms.unwrap_or(180);
+    let drag_lock_ms = gestures.drag_lock_ms.unwrap_or(0);
     quote! {
         ::rmk::input_device::touch::TouchGestureConfig {
             device_id: #device_id,
@@ -215,6 +216,7 @@ fn expand_touch_gesture_config(
             tap_move_percent: #tap_move_percent,
             tap_min_ms: #tap_min_ms,
             tap_drag_ms: #tap_drag_ms,
+            drag_lock_ms: #drag_lock_ms,
         }
     }
 }
