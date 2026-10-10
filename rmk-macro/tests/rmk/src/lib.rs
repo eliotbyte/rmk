@@ -94,6 +94,7 @@ pub mod event {
     /// Trait for events that can be published
     pub trait PublishableEvent: Clone {
         type Publisher: EventPublisher<Event = Self>;
+        const PUBLISH_IS_NOOP: bool;
         fn publisher() -> Self::Publisher;
     }
 
@@ -220,7 +221,9 @@ pub mod processor {
 }
 
 /// Mock macros module for marker attributes
-pub mod macros {}
+pub mod macros {
+    pub use rmk_macro::runnable_generated;
+}
 
 /// Mock KeyMap struct for keyboard configuration
 pub struct KeyMap<
