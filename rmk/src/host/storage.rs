@@ -5,10 +5,13 @@ use rmk_types::constants::MACRO_CHUNK_SIZE;
 use crate::keyboard::combo::Combo;
 use crate::storage::{Storage, StorageKey, StorageValue, print_storage_error};
 
-impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
-    Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>
-{
-    pub(crate) async fn read_keymap(
+impl<F: AsyncNorFlash> Storage<F> {
+    pub(crate) async fn read_layout<
+        const ROW: usize,
+        const COL: usize,
+        const NUM_LAYER: usize,
+        const NUM_ENCODER: usize,
+    >(
         &mut self,
         data: &mut crate::keymap::KeymapData<ROW, COL, NUM_LAYER, NUM_ENCODER>,
         behavior: &mut crate::config::BehaviorConfig,
