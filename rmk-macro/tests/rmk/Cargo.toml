@@ -5,6 +5,4 @@ edition = "2024"
 
 [dependencies]
 futures = { version = "0.3", default-features = false, features = ["async-await"] }
-
-[dev-dependencies]
 rmk-macro = { path = "../.." }

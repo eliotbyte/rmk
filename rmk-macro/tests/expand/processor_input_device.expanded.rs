@@ -91,7 +91,6 @@ impl ::core::fmt::Debug for ModeEvent {
 /// Basic combined: input_device + processor
 mod basic {
     use super::{ConfigEvent, SensorEvent, input_device, processor};
-    #[::rmk::macros::runnable_generated]
     pub struct SensorController {
         pub threshold: u16,
     }
@@ -246,7 +245,6 @@ mod basic {
 /// Reversed order: processor + input_device
 mod reversed {
     use super::{ConfigEvent, SensorEvent, input_device, processor};
-    #[::rmk::macros::runnable_generated]
     pub struct ReversedSensorController {
         pub threshold: u16,
     }
@@ -403,7 +401,6 @@ mod reversed {
 /// Polling combined: input_device + polling processor
 mod polling {
     use super::{ConfigEvent, SensorEvent, input_device, processor};
-    #[::rmk::macros::runnable_generated]
     pub struct PollingSensorController {
         pub counter: u32,
     }
@@ -605,7 +602,6 @@ mod polling {
 /// Multi-event combined: input_device + processor with multiple events
 mod multi_event {
     use super::{ConfigEvent, ModeEvent, SensorEvent, input_device, processor};
-    #[::rmk::macros::runnable_generated]
     pub struct MultiEventSensorController {
         pub threshold: u16,
         pub mode: u8,
@@ -923,7 +919,6 @@ mod multi_event {
 /// Multi-event polling combined
 mod multi_event_polling {
     use super::{ConfigEvent, ModeEvent, SensorEvent, input_device, processor};
-    #[::rmk::macros::runnable_generated]
     pub struct MultiEventPollingSensorController {
         pub threshold: u16,
         pub mode: u8,
@@ -1294,7 +1289,6 @@ mod multi_event_polling {
 }
 mod polling_without_subscription {
     use super::{SensorEvent, input_device, processor};
-    #[::rmk::macros::runnable_generated]
     pub struct PollingSensor;
     impl ::rmk::processor::Processor for PollingSensor {
         type Event = ::core::convert::Infallible;
@@ -1486,7 +1480,6 @@ mod polling_without_subscription {
             }
         }
     }
-    #[::rmk::macros::runnable_generated]
     pub struct ReversedPollingSensor;
     impl ::rmk::input_device::InputDevice for ReversedPollingSensor {
         type Event = SensorEvent;
