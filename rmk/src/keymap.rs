@@ -440,7 +440,7 @@ impl<'a> KeyMap<'a> {
         const NUM_ENCODER: usize,
     >(
         data: &'a mut KeymapData<ROW, COL, NUM_LAYER, NUM_ENCODER>,
-        storage: Option<&mut Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>>,
+        storage: Option<&mut Storage<F>>,
         behavior: &'a mut BehaviorConfig,
         positional_config: &'a PositionalConfig<ROW, COL>,
     ) -> Self {
@@ -452,7 +452,7 @@ impl<'a> KeyMap<'a> {
             if storage.clear_layout {
                 debug!("`clear_layout` is set, rewriting the items the compiled-in layout owns.");
                 storage.write_layout(data, behavior).await;
-            } else if storage.read_keymap(data, behavior).await.is_err() {
+            } else if storage.read_layout(data, behavior).await.is_err() {
                 error!("Failed to read from storage, clearing...");
                 storage.flash.erase_all().await.ok();
                 reboot_keyboard();

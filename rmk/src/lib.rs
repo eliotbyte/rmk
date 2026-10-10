@@ -163,7 +163,7 @@ pub async fn initialize_keymap_and_storage<
     storage_config: &config::StorageConfig,
     behavior_config: &'a mut config::BehaviorConfig,
     positional_config: &'a PositionalConfig<ROW, COL>,
-) -> (KeyMap<'a>, Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>) {
+) -> (KeyMap<'a>, Storage<F>) {
     // `mut` is only taken by the host build's keymap restore below.
     #[cfg_attr(not(feature = "host"), allow(unused_mut))]
     let mut storage = Storage::new(flash, storage_config).await;
