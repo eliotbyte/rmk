@@ -98,7 +98,7 @@ use embedded_hal_async::i2c::I2c;
 use rmk_macro::input_device;
 
 use crate::event::{
-    Axis, AxisEvent, AxisValType, PointingEvent, TOUCH_MAX_CONTACTS, TouchContact, TouchEvent, publish_event_async,
+    Axis, AxisEvent, AxisValType, PointingEvent, TOUCH_MAX_CONTACTS, TouchContact, TouchEvent, TouchpadEvent,
 };
 use crate::fmt::Debug;
 
@@ -106,7 +106,7 @@ const I2C_ADDR: u8 = 0x74; // default I2C bus address according to §8.2.
 
 const END_SESSION: [u8; 2] = [0xEE, 0xEE]; // §8.7. Address + dummy data byte; a zero-data write doesn't actually trigger end-of-comms.
 
-#[input_device(publish = PointingEvent)]
+#[input_device(publish = TouchpadEvent)]
 pub struct Iqs5xx<I, RDY>
 where
     I: I2c,
@@ -433,7 +433,7 @@ where
         Ok(data)
     }
 
-    async fn read_pointing_event(&mut self) -> PointingEvent {
+    async fn read_touchpad_event(&mut self) -> TouchpadEvent {
         loop {
             // Check initialization status on each iteration because the device
             // can reset and require re-initialization.
@@ -463,12 +463,11 @@ where
                         continue;
                     }
                     self.touching = touching;
-                    publish_event_async(TouchEvent {
+                    return TouchpadEvent::Touch(TouchEvent {
                         device_id: self.pointing_device_id,
                         max: self.max,
                         contacts,
-                    })
-                    .await;
+                    });
                 }
                 Ok(data) => {
                     let dx = i16::from_be_bytes([data[6], data[7]]);
@@ -479,24 +478,23 @@ where
                             axis,
                             value,
                         };
-                        return PointingEvent {
+                        return TouchpadEvent::Pointing(PointingEvent {
                             device_id: self.pointing_device_id,
                             axes: [rel(Axis::X, dx), rel(Axis::Y, dy), rel(Axis::Z, 0)],
-                        };
+                        });
                     }
                 }
                 Err(e) => {
+                    error!("iqs5xx {} failure: {:?}", self.pointing_device_id, e);
                     // A reset mid-touch must not leave a gesture going: lift every finger.
                     if self.touching {
                         self.touching = false;
-                        publish_event_async(TouchEvent {
+                        return TouchpadEvent::Touch(TouchEvent {
                             device_id: self.pointing_device_id,
                             max: self.max,
                             contacts: [None; TOUCH_MAX_CONTACTS],
-                        })
-                        .await;
+                        });
                     }
-                    error!("iqs5xx {} failure: {:?}", self.pointing_device_id, e);
                     Timer::after_millis(5).await;
                 }
             }
