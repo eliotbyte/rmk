@@ -180,40 +180,22 @@ fn expand_combos(
                 None => quote! {},
             };
 
-            // When no combos are defined the `let v = [#(#combos_def),*]` expression
-            // collapses to `let v = []`, which Rust can't type-infer. Emit an
-            // all-`None` array directly in that case.
-            let combos_field = if combos.combos.is_empty() {
-                quote! {
-                    combos: core::array::from_fn(|_| ::core::option::Option::None),
-                }
-            } else {
-                let combos_def = combos.combos.iter().map(|combo| {
-                    let actions = combo.actions.iter().map(|a| parse_key(a.to_owned(), profiles));
-                    let output = parse_key(combo.output.to_owned(), profiles);
-                    let layer = match combo.layer {
-                        Some(layer) => quote! { ::core::option::Option::Some(#layer) },
-                        None => quote! { ::core::option::Option::None },
-                    };
-                    quote! { ::rmk::keyboard::combo::Combo::new(::rmk::keyboard::combo::ComboConfig::new([#(#actions),*], #output, #layer)) }
-                });
-                quote! {
-                    combos: {
-                        let v = [#(#combos_def),*];
-                        core::array::from_fn(|i| {
-                            if i < v.len() {
-                                Some(v[i].clone())
-                            } else {
-                                None
-                            }
-                        })
-                    },
-                }
-            };
+            let combos_def = combos.combos.iter().map(|combo| {
+                let actions = combo.actions.iter().map(|a| parse_key(a.to_owned(), profiles));
+                let output = parse_key(combo.output.to_owned(), profiles);
+                let layer = match combo.layer {
+                    Some(layer) => quote! { ::core::option::Option::Some(#layer) },
+                    None => quote! { ::core::option::Option::None },
+                };
+                quote! { ::rmk::keyboard::combo::Combo::new(::rmk::keyboard::combo::ComboConfig::new([#(#actions),*], #output, #layer)) }
+            });
 
             quote! {
                 ::rmk::config::CombosConfig {
-                    #combos_field
+                    combos: {
+                        let v: &[::rmk::keyboard::combo::Combo] = &[#(#combos_def),*];
+                        core::array::from_fn(|i| v.get(i).cloned())
+                    },
                     #timeout
                     #prior_idle_time
                     ..Default::default()
